@@ -1,0 +1,3694 @@
+---
+title: "Rcode_manuscript"
+author: "Mengyi Dong"
+date: "2026-05-07"
+output: html_document
+---
+
+#Load packages
+```{r}
+library(phyloseq)
+library(FUNGuildR)
+library(Biostrings)
+library(qiime2R)
+library(tidyr)
+library(dplyr)
+library(ape)
+library(vegan)
+library(tibble)
+library(ggplot2)
+library(stringr)
+library(tibble)
+library(ggpubr)
+library(ggExtra)
+library(ggalluvial)
+```
+
+#Load data
+```{r}
+#The PacBio fungi dataset with only the samples matched Illumina ITS2 dataset
+ps_PacBio_Fungi_match <- readRDS("PacBio/ps_PacBio_Fungi_match_sklearn.rds")
+tax_ITS <- data.frame(ps_PacBio_Fungi_match@tax_table)
+metadata_ITS <- data.frame(ps_PacBio_Fungi_match@sam_data)
+otu_ITS <- data.frame(ps_PacBio_Fungi_match@otu_table)
+
+#The PacBio fungi dataset trimmed to ITS2 region with only samples match Illumina ITS2 dataset
+ps_PacBio_ITS2_match <- readRDS("PacBio/ps_PacBio_ITS2_match.rds")
+tax_pacbio_ITS2 <- data.frame(ps_PacBio_ITS2_match@tax_table)
+metadata_pacbio_ITS2 <- data.frame(ps_PacBio_ITS2_match@sam_data)
+otu_pacbio_ITS2 <- data.frame(ps_PacBio_ITS2_match@otu_table)
+
+#The cleaned Illumina ITS2 dataset
+ps_Illumina_ITS2 <- readRDS("Illumina/ps_Illumina_ITS2_sklearn.rds")
+tax_ITS2 <- data.frame(ps_Illumina_ITS2@tax_table)
+metadata_ITS2 <- data.frame(ps_Illumina_ITS2@sam_data)
+otu_ITS2 <- data.frame(ps_Illumina_ITS2@otu_table)
+```
+
+#Rarefaction
+##Fig S2: determine where a plateau occurs for each dataset
+```{r}
+# Convert to matrix, make sure OTUs are in rows for vegan
+otu_ITS <- t(as(otu_table(ps_PacBio_Fungi_match), "matrix"))
+otu_ITS2 <- t(as(otu_table(ps_Illumina_ITS2), "matrix"))
+otu_ITS2_pacbio <- t(as(otu_table(ps_PacBio_ITS2_match), "matrix"))
+
+otu_ITS2_filt <- otu_ITS2[rowSums(otu_ITS2, na.rm = TRUE) > 1, , drop = FALSE]
+
+# Plot rarefaction curves
+rarecurve(otu_ITS, step = 1000, sample=min(rowSums(otu_ITS)), label = FALSE, col = "deeppink", main = "PacBio ITS Rarefaction")
+rarecurve(otu_ITS2_filt, step = 1000, sample=min(rowSums(otu_ITS2)),label = FALSE, col = "orange", main = "Illumina ITS2 Rarefaction")
+rarecurve(otu_ITS2_pacbio, step = 1000, sample=min(rowSums(otu_ITS2_pacbio)),label = FALSE, col = "deeppink", main = "Trimmed ITS2 Rarefaction")
+```
+
+##Choose a Rarefaction Depth
+```{r}
+summary(sample_sums(ps_PacBio_Fungi_match))
+summary(sample_sums(ps_Illumina_ITS2))
+
+depth_shared <- 2000  # Choose based on your previous rarefaction curve
+
+# Rarefy both to same depth
+set.seed(123)
+ps_PacBio_rarefied <- rarefy_even_depth(ps_PacBio_Fungi_match, sample.size = depth_shared, rngseed = 123, verbose = FALSE)
+ps_Illumina_rarefied <- rarefy_even_depth(ps_Illumina_ITS2, sample.size = depth_shared, rngseed = 123, verbose = FALSE)
+
+ps_PacBio_rarefied
+ps_Illumina_rarefied
+
+# Number of non-zero taxa per sample = ASVs detected
+asv_counts_PacBio <- apply(otu_table(ps_PacBio_rarefied), 2, function(x) sum(x > 0))
+asv_counts_Illumina <- apply(otu_table(ps_Illumina_rarefied), 2, function(x) sum(x > 0))
+
+# Convert both vectors to data frames
+common_samples <- intersect(names(asv_counts_PacBio), names(asv_counts_Illumina))
+
+
+asv_df <- data.frame(
+  SampleID = common_samples,
+  ASVs_PacBio = asv_counts_PacBio[common_samples],
+  ASVs_Illumina = asv_counts_Illumina[common_samples]
+)
+
+#Plot for comparison
+summary_ASV_detected <- ggplot(asv_df, aes(x = ASVs_Illumina, y = ASVs_PacBio)) +
+  geom_point(size = 3, alpha = 0.3, color = "black") +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "gray") +
+  theme_bw(base_size = 14) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1)  # Rotate x-axis labels
+  )+
+  labs(x = "ASVs (Short-read)", y = "ASVs (Long-read)", title = paste("ASV Richness Comparison at", depth_shared, "Reads"))
+
+summary_ASV_detected
+
+#Visualize paired difference
+asv_long <- asv_df %>%
+  pivot_longer(cols = starts_with("ASVs"), names_to = "Pipeline", values_to = "ASV_Count")
+
+paired <- ggplot(asv_long, aes(x = Pipeline, y = ASV_Count, group = SampleID)) +
+  geom_line(alpha = 0.3) +
+  geom_point(size = 3, alpha = 0.3) +
+  labs(title = "ASVs Detected per Sample by Pipeline", y = "Number of ASVs", x = "Pipeline") +
+  theme_bw(base_size = 14)+
+   theme(
+    panel.grid.major = element_blank(),  # Remove major grid lines
+    panel.grid.minor = element_blank(),  # Remove minor grid lines
+    axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1)  # Rotate x-axis labels
+  )
+
+paired
+```
+
+
+#Good's coverage ITS2
+```{r}
+#Good’s coverage = 1 - (singletons / total reads) per sample
+goods_coverage <- function(ps) {
+  mat <- as(otu_table(ps), "matrix")
+  if (!taxa_are_rows(ps)) mat <- t(mat)
+  # counts: taxa x samples
+  singles <- colSums(mat == 1)
+  totals  <- colSums(mat)
+  tibble(sample_id = colnames(mat),
+         goods = 1 - (singles / totals))
+}
+
+gc_its2 <- goods_coverage(ps_Illumina_ITS2)
+summary(gc_its2$goods)
+
+gc_its <- goods_coverage(ps_PacBio_Fungi_match)
+summary(gc_its$goods)
+
+#Low coverage outlier
+low_cov <- gc_its2 %>% arrange(goods) %>% head(3)
+low_cov
+
+# decide a threshold (e.g., < 0.90); report n low-coverage samples
+sum(gc_its2$goods < 0.90, na.rm = TRUE)
+sum(gc_its$goods < 0.90, na.rm = TRUE)
+
+# Optional: drop extremely low-coverage samples from ITS2 *and* their paired PacBio samples
+drop_ids <- gc_its2 %>% filter(goods < 0.90) %>% pull(sample_id)
+drop_ids
+ps_Illumina_ITS2_filt <- prune_samples(!(sample_names(ps_Illumina_ITS2) %in% drop_ids), ps_Illumina_ITS2)
+ps_Illumina_ITS2_filt <- prune_taxa(taxa_sums(ps_Illumina_ITS2_filt) > 0, ps_Illumina_ITS2_filt)
+ps_PacBio_ITS_filt <- prune_samples(sample_names(ps_Illumina_ITS2_filt), ps_PacBio_Fungi_match)
+ps_PacBio_ITS_filt <- prune_taxa(taxa_sums(ps_PacBio_ITS_filt) > 0, ps_PacBio_ITS_filt)
+ps_PacBio_ITS2_filt <- prune_samples(sample_names(ps_Illumina_ITS2_filt), ps_PacBio_ITS2_match)
+ps_PacBio_ITS2_filt <- prune_taxa(taxa_sums(ps_PacBio_ITS2_filt) > 0, ps_PacBio_ITS2_filt)
+
+#Report coverage
+n_total <- nrow(gc_its2)
+n_ge95  <- sum(gc_its2$goods >= 0.95, na.rm = TRUE)
+paste0(n_ge95, "/", n_total, " (", round(100*n_ge95/n_total), "%) of ITS2 samples ≥ 0.95 coverage.")
+```
+
+#Create subsets
+## Subsetting by SampleType: Illumina ITS2
+```{r}
+ps <- ps_Illumina_ITS2_filt
+ps@sam_data$Reads <- sample_sums(ps)
+metadata_ITS2 <- data.frame(ps@sam_data)
+
+ps_ITS2_Control <- subset_samples(ps, SampleType %in% c("NegCon","PosCon"))
+ps_ITS2_Control <- prune_taxa(taxa_sums(ps_ITS2_Control) > 0, ps_ITS2_Control)
+ps_ITS2_Control
+
+ps_ITS2_PosCon <- subset_samples(ps, SampleType == "PosCon")
+ps_ITS2_PosCon <- prune_taxa(taxa_sums(ps_ITS2_PosCon) > 0, ps_ITS2_PosCon)
+ps_ITS2_PosCon
+
+ps_ITS2_ntc <- subset_samples(ps, Type == "ntc")
+ps_ITS2_ntc <- prune_taxa(taxa_sums(ps_ITS2_ntc)>0, ps_ITS2_ntc)
+ps_ITS2_ntc
+
+ps_ITS2_nc <- subset_samples(ps, Type == "nc")
+ps_ITS2_nc <- prune_taxa(taxa_sums(ps_ITS2_nc)>0, ps_ITS2_nc)
+ps_ITS2_nc
+
+ps_ITS2_nec <- subset_samples(ps, Type == "nec")
+ps_ITS2_nec <- prune_taxa(taxa_sums(ps_ITS2_nec)>0, ps_ITS2_nec)
+ps_ITS2_nec
+
+ps_ITS2_MB <- subset_samples(ps, Type == "method_blank")
+ps_ITS2_MB <- prune_taxa(taxa_sums(ps_ITS2_MB)>0, ps_ITS2_MB)
+ps_ITS2_MB
+
+ps_ITS2_FB <- subset_samples(ps, Type == "field_blank")
+ps_ITS2_FB <- prune_taxa(taxa_sums(ps_ITS2_FB)>0, ps_ITS2_FB)
+ps_ITS2_FB
+
+ps_ITS2_Sample <- subset_samples(ps, SampleType %in% c("air","swab"))
+ps_ITS2_Sample <- prune_taxa(taxa_sums(ps_ITS2_Sample) > 0, ps_ITS2_Sample)
+ps_ITS2_Sample
+
+ps_ITS2_AirSwab <- subset_samples(ps, Location %in% c("Home1","Lab1","Lab2"))
+ps_ITS2_AirSwab <- prune_taxa(taxa_sums(ps_ITS2_AirSwab) > 0, ps_ITS2_AirSwab)
+ps_ITS2_AirSwab
+```
+
+## Subsetting by SampleType: PacBio ITS
+```{r}
+ps <- ps_PacBio_ITS_filt
+ps@sam_data$Reads <- sample_sums(ps)
+metadata_ITS <- data.frame(ps@sam_data)
+
+ITS_control <- subset_samples(ps, SampleType %in% c("NegCon","PosCon"))
+ITS_control <- prune_taxa(taxa_sums(ITS_control)>0, ITS_control)
+ITS_control
+
+ITS_PosCon <- subset_samples(ps, SampleType == "PosCon" )
+ITS_PosCon <- prune_taxa(taxa_sums(ITS_PosCon)>0, ITS_PosCon)
+ITS_PosCon
+
+ITS_ntc <- subset_samples(ps, Type == "ntc")
+ITS_ntc <- prune_taxa(taxa_sums(ITS_ntc)>0, ITS_ntc)
+ITS_ntc
+
+ITS_nec <- subset_samples(ps, Type == "nec")
+ITS_nec <- prune_taxa(taxa_sums(ITS_nec)>0, ITS_nec)
+ITS_nec
+
+ITS_MB <- subset_samples(ps, Type == "method_blank")
+ITS_MB <- prune_taxa(taxa_sums(ITS_MB)>0, ITS_MB)
+ITS_MB
+
+ITS_FB <- subset_samples(ps, Type == "field_blank")
+ITS_FB <- prune_taxa(taxa_sums(ITS_FB)>0, ITS_FB)
+ITS_FB
+
+ps_ITS_sample <- subset_samples(ps, SampleType %in% c("air","swab"))
+ps_ITS_sample <- prune_taxa(taxa_sums(ps_ITS_sample)>0, ps_ITS_sample)
+ps_ITS_sample
+
+ps_ITS_AirSwab <- subset_samples(ps, Location %in% c("Home1","Lab1","Lab2"))
+ps_ITS_AirSwab <- prune_taxa(taxa_sums(ps_ITS_AirSwab) > 0, ps_ITS_AirSwab)
+ps_ITS_AirSwab
+```
+
+## Merge same sequences PacBio ITS2
+```{r}
+seqs <- as.character(refseq(ps_PacBio_ITS2_filt))
+table(duplicated(seqs))
+
+dup_seqs <- seqs[duplicated(seqs) | duplicated(seqs, fromLast = TRUE)]
+length(unique(dup_seqs))
+
+dup_df <- data.frame(
+  ASV = taxa_names(ps_PacBio_ITS2_filt),
+  Sequence = seqs,
+  stringsAsFactors = FALSE
+)
+
+# Extract otu table
+otu_mat <- as(otu_table(ps_PacBio_ITS2_filt), "matrix")
+
+# Make sure taxa are rows
+if (!taxa_are_rows(ps_PacBio_ITS2_filt)) {
+  otu_mat <- t(otu_mat)
+}
+
+# Extract sequences
+seqs <- as.character(refseq(ps_PacBio_ITS2_filt))
+
+# Sum counts for identical sequences
+otu_merged <- rowsum(otu_mat, group = seqs)
+
+# Build merged tax table
+tax_mat <- as(tax_table(ps_PacBio_ITS2_filt), "matrix")
+tax_df <- data.frame(
+  Sequence = seqs,
+  tax_mat,
+  stringsAsFactors = FALSE
+)
+
+# Keep first taxonomy entry per unique sequence
+# If taxonomy differs among collapsed ASVs, see note below
+tax_df_merged <- tax_df[!duplicated(tax_df$Sequence), ]
+rownames(tax_df_merged) <- tax_df_merged$Sequence
+tax_df_merged$Sequence <- NULL
+
+# Keep rows in same order as merged otu table
+tax_df_merged <- tax_df_merged[rownames(otu_merged), , drop = FALSE]
+
+# Build merged refseq object
+refseq_merged <- Biostrings::DNAStringSet(rownames(otu_merged))
+names(refseq_merged) <- rownames(otu_merged)
+
+# Rebuild phyloseq
+ps_trimmed_ITS2_merged <- phyloseq(
+  otu_table(otu_merged, taxa_are_rows = TRUE),
+  tax_table(as.matrix(tax_df_merged)),
+  sample_data(ps_PacBio_ITS2_filt),
+  refseq(refseq_merged)
+)
+
+ntaxa(ps_PacBio_ITS2_filt)
+ntaxa(ps_trimmed_ITS2_merged)
+
+seqs2 <- as.character(refseq(ps_trimmed_ITS2_merged))
+any(duplicated(seqs2))
+```
+
+## Subsetting by SampleType: Trimmed ITS2
+```{r}
+ps <- ps_PacBio_ITS2_filt
+
+pacbio_ITS2_control <- subset_samples(ps, SampleType %in% c("NegCon","PosCon"))
+pacbio_ITS2_control <- prune_taxa(taxa_sums(pacbio_ITS2_control)>0, pacbio_ITS2_control)
+pacbio_ITS2_control
+
+pacbio_ITS2_sample <- subset_samples(ps, SampleType  %in% c("air","swab"))
+pacbio_ITS2_sample <- prune_taxa(taxa_sums(pacbio_ITS2_sample)>0, pacbio_ITS2_sample)
+pacbio_ITS2_sample
+
+pacbio_ITS2_AirSwab <- subset_samples(ps, Location %in% c("Home1","Lab1","Lab2"))
+pacbio_ITS2_AirSwab <- prune_taxa(taxa_sums(pacbio_ITS2_AirSwab) > 0, pacbio_ITS2_AirSwab)
+pacbio_ITS2_AirSwab
+```
+
+
+#Venn diagram and UpSet plot: overlapping taxa
+```{r}
+library(VennDiagram)
+# Extract the taxa names from each object
+taxa1 <- taxa_names(ps_ITS_sample)
+taxa2 <- taxa_names(ITS_PosCon)
+taxa3 <- taxa_names(ITS_ntc)
+taxa5 <- taxa_names(ITS_nec)
+taxa6 <- taxa_names(ITS_FB)
+taxa7 <- taxa_names(ITS_MB)
+
+# Combine into a list
+taxa_list <- list(
+  Sample = taxa1,
+  PosControl = taxa2
+)
+
+# Create a Venn diagram
+venn.plot <- venn.diagram(
+  x = taxa_list,
+  filename = NULL,        # Don't write to file immediately
+  col = "black",
+  fill = c("dodgerblue", "goldenrod1"),
+  alpha = 0.50,
+  cex = 1.5,
+  cat.col = c("dodgerblue", "goldenrod1"),
+  cat.cex = 1.5,
+  cat.fontface = "bold",
+  main = "Overlapping Taxa Among Four Phyloseq Objects"
+)
+
+grid::grid.draw(venn.plot)
+
+# If you want to save it as an image file:
+png(filename = "VennDiagram_ITS_taxa_wControl.png", width = 800, height = 800, res = 150)
+grid::grid.draw(venn.plot)
+dev.off()
+
+#Investigate different types of control
+taxa_list <- list(
+  Sample = taxa1,
+  PosControl = taxa2,
+  ntc = taxa3,
+  nec = taxa5,
+  FieldBlank = taxa6,
+  MethodBlank = taxa7
+)
+
+library("ggVennDiagram")
+ggVennDiagram(taxa_list, force_upset = TRUE, order.set.by = "name", order.intersect.by = "none")
+```
+
+#Venn diagram and UpSet plot: overlapping taxa
+```{r}
+library(VennDiagram)
+# Extract the taxa names from each object
+taxa1 <- taxa_names(ps_ITS2_Sample)
+taxa2 <- taxa_names(ps_ITS2_PosCon)
+taxa3 <- taxa_names(ps_ITS2_ntc)
+taxa4 <- taxa_names(ps_ITS2_nc)
+taxa5 <- taxa_names(ps_ITS2_nec)
+taxa6 <- taxa_names(ps_ITS2_FB)
+taxa7 <- taxa_names(ps_ITS2_MB)
+
+# Combine into a list
+taxa_list <- list(
+  Sample = taxa1,
+  PosControl = taxa2
+)
+
+# Create a Venn diagram
+venn.plot <- venn.diagram(
+  x = taxa_list,
+  filename = NULL,        # Don't write to file immediately
+  col = "black",
+  fill = c("dodgerblue", "goldenrod1"),
+  alpha = 0.50,
+  cex = 1.5,
+  cat.col = c("dodgerblue", "goldenrod1"),
+  cat.cex = 1.5,
+  cat.fontface = "bold",
+  main = "Overlapping Taxa Among Four Phyloseq Objects"
+)
+
+grid::grid.draw(venn.plot)
+
+# If you want to save it as an image file:
+png(filename = "VennDiagram_ITS2_taxa_wControl.png", width = 800, height = 800, res = 150)
+grid::grid.draw(venn.plot)
+dev.off()
+
+#Investigate different types of control
+taxa_list <- list(
+  Sample = taxa1,
+  PosControl = taxa2,
+  ntc = taxa3,
+  nc = taxa4,
+  nec = taxa5,
+  FieldBlank = taxa6,
+  MethodBlank = taxa7
+)
+
+library("ggVennDiagram")
+ggVennDiagram(taxa_list, force_upset = TRUE, order.set.by = "name", order.intersect.by = "none")
+```
+
+#Fig. S4 Abundance plot
+```{r}
+#Illumina ITS2
+# Step 1: Aggregate taxa at desired rank, e.g., Phylum
+ps_abundance <- tax_glom(ps_Illumina_ITS2_filt, taxrank = "phylum")
+
+# Step 2: Convert to relative abundances
+ps_abundance <- microbiome::transform(ps_abundance, "compositional")
+
+# Step 3: Create a stacked bar plot
+p_ITS2abundance <- plot_bar(ps_abundance, fill = "phylum") + 
+     geom_bar(stat = "identity", position = "stack") +
+     theme_void() +
+     theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+     ggtitle("Relative Abundance of Taxa at Phylum Level - Short Read")
+
+print(p_ITS2abundance)
+
+#PacBio ITS
+# Step 1: Aggregate taxa at desired rank, e.g., Phylum
+ps_abundance <- tax_glom(ps_PacBio_ITS_filt, taxrank = "Phylum")
+
+# Step 2: Convert to relative abundances
+ps_abundance <- microbiome::transform(ps_abundance, "compositional")
+
+# Step 3: Create a stacked bar plot
+p_ITSabundance <- plot_bar(ps_abundance, fill = "Phylum") + 
+     geom_bar(stat = "identity", position = "stack") +
+     theme_void() +
+     theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+     ggtitle("Relative Abundance of Taxa at Phylum Level - Long Read")
+
+print(p_ITSabundance)
+
+#PacBio ITS2
+# Step 1: Aggregate taxa at desired rank, e.g., Phylum
+ps_abundance <- tax_glom(ps_PacBio_ITS2_filt, taxrank = "Phylum")
+
+# Step 2: Convert to relative abundances
+ps_abundance <- microbiome::transform(ps_abundance, "compositional")
+
+# Step 3: Create a stacked bar plot
+p_ITS2abundance <- plot_bar(ps_abundance, fill = "Phylum") + 
+     geom_bar(stat = "identity", position = "stack") +
+     theme_void() +
+     theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+     ggtitle("Relative Abundance of Taxa at Phylum Level - Long Read Trimmed")
+
+print(p_ITS2abundance)
+```
+
+#Reads per sample
+```{r}
+# Get read counts per sample
+reads_per_sample <- sample_sums(ps_Illumina_ITS2)
+
+# Calculate mean and standard deviation
+mean_reads <- mean(reads_per_sample)
+sd_reads <- sd(reads_per_sample)
+
+# Print results
+cat("Mean reads per sample Illumina ITS2:", round(mean_reads, 2), "\n")
+cat("Standard deviation Illumina ITS2:", round(sd_reads, 2), "\n")
+ps_Illumina_ITS2
+
+# Get read counts per sample
+reads_per_sample <- sample_sums(ps_PacBio_Fungi_match)
+
+# Calculate mean and standard deviation
+mean_reads <- mean(reads_per_sample)
+sd_reads <- sd(reads_per_sample)
+
+# Print results
+cat("Mean reads per sample PacBio ITS:", round(mean_reads, 2), "\n")
+cat("Standard deviation PacBio ITS:", round(sd_reads, 2), "\n")
+ps_PacBio_Fungi_match
+```
+
+#Internal QC: read and ASV distribution
+```{r}
+illum_reads <- sample_sums(ps_ITS2_Sample)
+pacbio_reads <- sample_sums(ps_ITS_sample)
+
+df_qc <- bind_rows(
+  tibble(sample = names(illum_reads),
+         reads = illum_reads,
+         platform = "ITS2"),
+  tibble(sample = names(pacbio_reads),
+         reads = pacbio_reads,
+         platform = "Full_ITS")
+)
+
+#Plot read per sample
+ggplot(df_qc, aes(x = platform, y = reads, fill = platform)) +
+  geom_boxplot(outlier.alpha = 0.3) +
+  geom_jitter(width = 0.2, alpha = 0.4) +
+  scale_fill_manual(values = c("ITS2"="#F28E2B","Full_ITS"="#B91372")) +
+  labs(x = "", y = "Post-QC reads per sample") +
+  theme_classic(base_size = 14)
+
+
+illum_asvs <- apply(otu_table(ps_ITS2_Sample), 2, function(x) sum(x > 0))
+pacbio_asvs <- apply(otu_table(ps_ITS_sample), 2, function(x) sum(x > 0))
+
+df_asv <- bind_rows(
+  tibble(sample = names(illum_asvs), asvs = illum_asvs, platform = "ITS2"),
+  tibble(sample = names(pacbio_asvs), asvs = pacbio_asvs, platform = "Full_ITS")
+)
+
+
+ggplot(df_asv, aes(x = platform, y = asvs, fill = platform)) +
+  geom_boxplot(outlier.alpha = 0.3) +
+  geom_jitter(width = 0.2, alpha = 0.4) +
+  labs(x = "", y = "ASVs per sample") +
+  theme_classic(base_size = 14)
+```
+
+
+#ASV assigned
+##Illumina
+```{r}
+tax <- data.frame(ps_Illumina_ITS2_filt@tax_table)
+#Optional
+#tax$Species[grepl("_sp$", tax$Species)] <- NA
+#tax$Genus[grepl("_gen_Incertae_sedis$", tax$Genus)] <- NA
+#tax$Gamily[grepl("_fam_Incertae_sedis$", tax$Family)] <- NA
+#tax$Order[grepl("_ord_Incertae_sedis$", tax$Order)] <- NA
+#tax$Class[grepl("_cls_Incertae_sedis$", tax$Class)] <- NA
+#tax$Phylum[grepl("_phy_Incertae_sedis$", tax$Phylum)] <- NA
+#tax$Kingdom[grepl("Unassigned", tax$Kingdom)] <- NA
+
+# Count the number of ASVs assigned at each level
+assigned_counts <- colSums(!is.na(tax))
+
+# Calculate the total number of ASVs
+total_asvs <- nrow(tax)
+
+# Calculate the percentage of ASVs assigned at each level
+assigned_percentages <- (assigned_counts / total_asvs) * 100
+
+# Combine into a data frame for better visualization
+assignment_stats <- data.frame(
+  Taxonomy_Level = colnames(tax),
+  Assigned_Count = assigned_counts,
+  Total_ASVs = total_asvs,
+  Assigned_Percentage = assigned_percentages
+)
+
+Illumina_assignment <- assignment_stats[1:7, ]
+
+# Arrange the orders of taxonomy rank
+taxonomy_order <- c("kingdom", "phylum", "class", "order", "family", "genus", "species")
+Illumina_assignment$Taxonomy_Level <- factor(Illumina_assignment$Taxonomy_Level, levels = taxonomy_order)
+
+# Print the results
+print(Illumina_assignment)
+
+#Plot
+ASV_assigned_distribution <- ggplot(Illumina_assignment, aes(x = Taxonomy_Level, y = Assigned_Percentage)) +
+  geom_bar(stat = "identity", color = "black", linewidth = 0.2, fill = "#7BAFD4", alpha = 0.7) +
+  geom_text(aes(label = round(Assigned_Percentage, 1)),  # Add labels rounded to 1 decimal place
+            vjust = -0.2,   # Position labels just above the bars
+            color = "black", # Color of the text labels
+            size = 4) +      # Adjust the size of the labels
+  labs(title = "Percentage of ASVs Assigned at Each Taxonomy Level",
+       x = "Taxonomy Level", y = "Assigned Percentage (%)") +
+  theme_bw() +
+  theme(
+    panel.grid.major = element_blank(),  # Remove major grid lines
+    panel.grid.minor = element_blank(),  # Remove minor grid lines
+    axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1)  # Rotate x-axis labels
+  )
+
+ASV_assigned_distribution
+```
+
+##PacBio_Fungi
+```{r}
+tax_PacBio_fungi <- data.frame(ps_PacBio_ITS_filt@tax_table)
+#Optional
+#tax_PacBio_fungi$Species[grepl("_sp$", tax_PacBio_fungi$Species)] <- NA
+#tax_PacBio_fungi$Genus[grepl("_gen_Incertae_sedis$", tax_PacBio_fungi$Genus)] <- NA
+#tax_PacBio_fungi$Family[grepl("_fam_Incertae_sedis$", tax_PacBio_fungi$Family)] <- NA
+#tax_PacBio_fungi$Order[grepl("_ord_Incertae_sedis$", tax_PacBio_fungi$Order)] <- NA
+#tax_PacBio_fungi$Class[grepl("_cls_Incertae_sedis$", tax_PacBio_fungi$Class)] <- NA
+#tax_PacBio_fungi$Phylum[grepl("_phy_Incertae_sedis$", tax_PacBio_fungi$Phylum)] <- NA
+
+# Count the number of ASVs assigned at each level
+assigned_counts <- colSums(!is.na(tax_PacBio_fungi))
+
+# Calculate the total number of ASVs
+total_asvs <- nrow(tax_PacBio_fungi)
+
+# Calculate the percentage of ASVs assigned at each level
+assigned_percentages <- (assigned_counts / total_asvs) * 100
+
+# Combine into a data frame for better visualization
+assignment_stats <- data.frame(
+  Taxonomy_Level = colnames(tax_PacBio_fungi),
+  Assigned_Count = assigned_counts,
+  Total_ASVs = total_asvs,
+  Assigned_Percentage = assigned_percentages
+)
+
+PacBio_assignment <- assignment_stats[1:7, ]
+
+# Arrange the orders of taxonomy rank
+taxonomy_order <- c("Kingdom", "Phylum", "Class", "Order", "Family", "Genus", "Species")
+PacBio_assignment$Taxonomy_Level <- factor(PacBio_assignment$Taxonomy_Level, levels = taxonomy_order)
+
+# Print the results
+print(PacBio_assignment)
+
+#Plot
+ASV_assigned_distribution <- ggplot(PacBio_assignment, aes(x = Taxonomy_Level, y = Assigned_Percentage)) +
+  geom_bar(stat = "identity", color = "black", linewidth = 0.2, fill = "#7BAFD4", alpha = 0.7) +
+  geom_text(aes(label = round(Assigned_Percentage, 1)),  # Add labels rounded to 1 decimal place
+            vjust = -0.2,   # Position labels just above the bars
+            color = "black", # Color of the text labels
+            size = 4) +      # Adjust the size of the labels
+  labs(title = "Percentage of ASVs Assigned at Each Taxonomy Level",
+       x = "Taxonomy Level", y = "Assigned Percentage (%)") +
+  theme_bw() +
+  theme(
+    panel.grid.major = element_blank(),  # Remove major grid lines
+    panel.grid.minor = element_blank(),  # Remove minor grid lines
+    axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1)  # Rotate x-axis labels
+  )
+
+ASV_assigned_distribution
+```
+
+##PacBio_ITS2
+```{r}
+tax_pacbio_ITS2 <- data.frame(ps_PacBio_ITS2_filt@tax_table)
+#Optional
+tax_pacbio_ITS2$Species[grepl("_sp$", tax_pacbio_ITS2$Species)] <- NA
+tax_pacbio_ITS2$Genus[grepl("_gen_Incertae_sedis$", tax_pacbio_ITS2$Genus)] <- NA
+tax_pacbio_ITS2$Family[grepl("_fam_Incertae_sedis$", tax_pacbio_ITS2$Family)] <- NA
+tax_pacbio_ITS2$Order[grepl("_ord_Incertae_sedis$", tax_pacbio_ITS2$Order)] <- NA
+tax_pacbio_ITS2$Class[grepl("_cls_Incertae_sedis$", tax_pacbio_ITS2$Class)] <- NA
+tax_pacbio_ITS2$Phylum[grepl("_phy_Incertae_sedis$", tax_pacbio_ITS2$Phylum)] <- NA
+
+# Count the number of ASVs assigned at each level
+assigned_counts <- colSums(!is.na(tax_pacbio_ITS2))
+
+# Calculate the total number of ASVs
+total_asvs <- nrow(tax_pacbio_ITS2)
+
+# Calculate the percentage of ASVs assigned at each level
+assigned_percentages <- (assigned_counts / total_asvs) * 100
+
+# Combine into a data frame for better visualization
+assignment_stats <- data.frame(
+  Taxonomy_Level = colnames(tax_pacbio_ITS2),
+  Assigned_Count = assigned_counts,
+  Total_ASVs = total_asvs,
+  Assigned_Percentage = assigned_percentages
+)
+
+PacBio_ITS2_assignment <- assignment_stats[1:7, ]
+
+# Arrange the orders of taxonomy rank
+taxonomy_order <- c("Kingdom", "Phylum", "Class", "Order", "Family", "Genus", "Species")
+PacBio_ITS2_assignment$Taxonomy_Level <- factor(PacBio_assignment$Taxonomy_Level, levels = taxonomy_order)
+
+# Print the results
+print(PacBio_ITS2_assignment)
+
+#Plot
+ASV_assigned_distribution <- ggplot(PacBio_ITS2_assignment, aes(x = Taxonomy_Level, y = Assigned_Percentage)) +
+  geom_bar(stat = "identity", color = "black", linewidth = 0.2, fill = "deeppink", alpha = 0.7) +
+  geom_text(aes(label = round(Assigned_Percentage, 1)),  # Add labels rounded to 1 decimal place
+            vjust = -0.2,   # Position labels just above the bars
+            color = "black", # Color of the text labels
+            size = 4) +      # Adjust the size of the labels
+  labs(title = "Percentage of ASVs Assigned at Each Taxonomy Level",
+       x = "Taxonomy Level", y = "Assigned Percentage (%)") +
+  theme_bw() +
+  theme(
+    panel.grid.major = element_blank(),  # Remove major grid lines
+    panel.grid.minor = element_blank(),  # Remove minor grid lines
+    axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1)  # Rotate x-axis labels
+  )
+
+ASV_assigned_distribution
+```
+
+
+#%Assigned compare
+```{r}
+PacBio_assignment$Method <- "Full-length ITS"
+PacBio_ITS2_assignment$Method <- "Trimmed ITS2"
+Illumina_assignment$Method <- "ITS2"
+Illumina_assignment <- Illumina_assignment %>%
+  mutate(Taxonomy_Level = str_to_title(Taxonomy_Level))
+
+combined_assignment <- bind_rows(PacBio_assignment, Illumina_assignment, PacBio_ITS2_assignment)
+
+# Arrange the orders of taxonomy rank
+taxonomy_order <- c("Kingdom", "Phylum", "Class", "Order", "Family", "Genus", "Species")
+combined_assignment$Taxonomy_Level <- factor(combined_assignment$Taxonomy_Level, levels = taxonomy_order)
+
+PercentAssigned_combined <- ggplot(combined_assignment, aes(x = Taxonomy_Level, y = Assigned_Percentage, fill = Method)) +
+  geom_bar(stat = "identity", color = "black", linewidth = 0.2, position = "dodge") +
+  geom_text(aes(label = round(Assigned_Percentage, 1)),  # Add labels rounded to 1 decimal place
+            vjust = -0.2,   # Position labels just above the bars
+            color = "black", # Color of the text labels
+            size = 4) + 
+  labs(title = "Percentage of ASVs Assigned",
+       x = "Taxonomic Rank", y = "% Assigned") +
+  scale_fill_manual(values = c("Full-length ITS" = "deeppink", "ITS2" = "orange","Trimmed ITS2" = "pink")) +
+  theme_bw(base_size = 14) +
+  theme(
+    panel.grid.major = element_blank(),  # Remove major grid lines
+    panel.grid.minor = element_blank(),  # Remove minor grid lines
+    axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1)  # Rotate x-axis labels
+  )
+
+PercentAssigned_combined
+```
+
+# Fig 1a: %Assigned paired comparison by sample
+```{r}
+percent_assigned_by_Rank <- function(ps, ranks = c("Kingdom","Phylum","Class","Order","Family","Genus","Species")) {
+  stopifnot(inherits(ps, "phyloseq"))
+
+  OTU  <- as(otu_table(ps), "matrix")        # taxa x samples (or samples x taxa)
+  if (taxa_are_rows(ps)) OTU <- t(OTU)       # make it samples x taxa
+  TAX  <- as(tax_table(ps), "matrix")        # taxa x ranks
+
+  # Ensure rank names exist
+  ranks <- ranks[ranks %in% colnames(TAX)]
+  if (length(ranks) == 0) stop("None of the specified ranks found in tax_table(ps).")
+
+  # sample totals (denominator)
+  sample_totals <- rowSums(OTU)
+  keep_samples  <- sample_totals > 0
+  OTU <- OTU[keep_samples, , drop = FALSE]
+  sample_totals <- sample_totals[keep_samples]
+
+  # For each rank, mark taxa that are assigned (non‑NA and non‑empty)
+  is_assigned_by_rank <- lapply(ranks, function(rk) {
+    tax_vec <- TAX[, rk]
+    !is.na(tax_vec) & nzchar(tax_vec)
+  })
+  names(is_assigned_by_rank) <- ranks
+
+  # Compute % assigned per sample per rank
+  df_list <- lapply(ranks, function(rk) {
+    assigned_taxa <- is_assigned_by_rank[[rk]]
+    # abundance‑weighted numerator
+    num <- OTU[, assigned_taxa, drop = FALSE] |> rowSums()
+    pct <- 100 * num / sample_totals
+
+    # # If you prefer unweighted (by ASV presence), replace the 2 lines above by:
+    # present <- OTU > 0
+    # pct <- 100 * rowSums(present[, assigned_taxa, drop = FALSE]) / rowSums(present)
+
+    tibble(sample_id = rownames(OTU),
+           rank      = rk,
+           pct_assigned = as.numeric(pct))
+  })
+
+  bind_rows(df_list)
+}
+
+percent_assigned_by_rank <- function(ps, ranks = c("kingdom","phylum","class","order","family","genus","species")) {
+  stopifnot(inherits(ps, "phyloseq"))
+
+  OTU  <- as(otu_table(ps), "matrix")        # taxa x samples (or samples x taxa)
+  if (taxa_are_rows(ps)) OTU <- t(OTU)       # make it samples x taxa
+  TAX  <- as(tax_table(ps), "matrix")        # taxa x ranks
+
+  # Ensure rank names exist
+  ranks <- ranks[ranks %in% colnames(TAX)]
+  if (length(ranks) == 0) stop("None of the specified ranks found in tax_table(ps).")
+
+  # sample totals (denominator)
+  sample_totals <- rowSums(OTU)
+  keep_samples  <- sample_totals > 0
+  OTU <- OTU[keep_samples, , drop = FALSE]
+  sample_totals <- sample_totals[keep_samples]
+
+  # For each rank, mark taxa that are assigned (non‑NA and non‑empty)
+  is_assigned_by_rank <- lapply(ranks, function(rk) {
+    tax_vec <- TAX[, rk]
+    !is.na(tax_vec) & nzchar(tax_vec)
+  })
+  names(is_assigned_by_rank) <- ranks
+
+  # Compute % assigned per sample per rank
+  df_list <- lapply(ranks, function(rk) {
+    assigned_taxa <- is_assigned_by_rank[[rk]]
+    # abundance‑weighted numerator
+    num <- OTU[, assigned_taxa, drop = FALSE] |> rowSums()
+    pct <- 100 * num / sample_totals
+
+    # # If you prefer unweighted (by ASV presence), replace the 2 lines above by:
+    # present <- OTU > 0
+    # pct <- 100 * rowSums(present[, assigned_taxa, drop = FALSE]) / rowSums(present)
+
+    tibble(sample_id = rownames(OTU),
+           rank      = rk,
+           pct_assigned = as.numeric(pct))
+  })
+
+  bind_rows(df_list)
+}
+```
+
+
+```{r}
+# Choose the ranks you want to test
+Ranks <- c("Kingdom","Phylum","Class","Order","Family","Genus","Species")
+ranks <- c("kingdom","phylum","class","order","family","genus","species")
+
+#Compute %assigned for each platform and combine
+ITS2_df <- percent_assigned_by_rank(ps_Illumina_ITS2_filt, ranks) %>%
+  mutate(platform = "ITS2") %>%
+  mutate(rank = str_to_title(rank))
+
+ITS_df <- percent_assigned_by_Rank(ps_PacBio_ITS_filt, Ranks) %>%
+  mutate(platform = "Full_ITS")
+
+#Make a paired wide table by rank
+pct_wide <- ITS2_df %>%
+  select(sample_id, rank, pct_assigned) %>%
+  rename(ITS2 = pct_assigned) %>%
+  inner_join(
+    ITS_df %>%
+      select(sample_id, rank, pct_assigned) %>%
+      rename(Full_ITS = pct_assigned),
+    by = c("sample_id", "rank")
+  ) %>%
+  mutate(diff_pct = Full_ITS - ITS2)
+
+pct_wide %>% count(rank)
+
+#Run paired Wilcoxon per rank
+run_wilcox <- function(dat) {
+  wt <- wilcox.test(dat$Full_ITS, dat$ITS2,
+                    paired = TRUE, alternative = "two.sided",
+                    conf.int = TRUE, conf.level = 0.95,
+                    exact = FALSE, correct = FALSE)
+  tibble::tibble(
+    n_pairs     = nrow(dat),
+    V           = unname(wt$statistic),
+    p_value     = wt$p.value,
+    median_diff = unname(wt$estimate),  # HL estimate of median(FullITS − ITS2)
+    conf_low    = wt$conf.int[1],
+    conf_high   = wt$conf.int[2]
+  )
+}
+
+wilcox_by_rank <- pct_wide %>%
+  group_by(rank) %>%
+  group_modify(~ run_wilcox(.x)) %>%
+  ungroup() %>%
+  mutate(q_value = p.adjust(p_value, method = "BH"))
+
+wilcox_by_rank
+```
+
+```{r}
+# Plot
+pct_wide_long <- pct_wide %>%
+  pivot_longer(cols = c(ITS2, Full_ITS),
+               names_to = "platform",
+               values_to = "pct_assigned")
+
+sum_df <- pct_wide_long %>%
+  group_by(rank, platform) %>%
+  summarise(
+    mean_pct = mean(pct_assigned, na.rm = TRUE),
+    sd_pct   = sd(pct_assigned, na.rm = TRUE),
+    se_pct   = sd_pct / sqrt(n()),
+    ci_low   = mean_pct - qt(0.975, df = n()-1) * se_pct,
+    ci_up    = mean_pct + qt(0.975, df = n()-1) * se_pct,
+    n = n(),
+    .groups = "drop"
+  )
+
+taxonomy_order <- c("Kingdom", "Phylum", "Class", "Order", "Family", "Genus", "Species")
+sum_df$rank <- factor(sum_df$rank, levels = taxonomy_order)
+
+PCT_Assigned <- ggplot(sum_df, aes(x = rank, y = mean_pct, fill = platform)) +
+  geom_col(position = position_dodge(width = 0.7),
+           width = 0.6, color = "black", linewidth = 0.5) +
+  geom_text(aes(label = round(mean_pct, 1)),  # Add labels rounded to 1 decimal place
+            vjust = -1.0,   # Position labels just above the bars
+            color = "black", # Color of the text labels
+            position = position_dodge(width = 0.7),           
+             size = 4) + 
+  geom_errorbar(aes(ymin = mean_pct - se_pct, ymax = mean_pct + se_pct),
+                position = position_dodge(width = 0.7),
+                width = 0.25, linewidth = 0.5) +
+  scale_fill_manual(values = c(Full_ITS = "deeppink", ITS2 = "orange"),
+                    labels = c("Full-length ITS", "ITS2")) +
+  labs(x = "Taxonomic Rank",
+       y = "% Assigned",
+       fill = "Method") +
+  theme_classic(base_size = 14) +
+  theme(axis.text.x = element_text(angle = 30, hjust = 1))
+
+PCT_Assigned
+
+
+diff_tbl <- pct_wide %>%
+  filter(rank != "Kingdom") %>%
+  mutate(diff_pct = Full_ITS - ITS2)
+
+diff_sum <- diff_tbl %>%
+  group_by(rank) %>%
+  summarise(
+    mean_d = mean(diff_pct),
+    se_d   = sd(diff_pct) / sqrt(n()),
+    ci95_l = mean_d - qt(0.975, df = n()-1) * se_d,
+    ci95_u = mean_d + qt(0.975, df = n()-1) * se_d,
+    .groups = "drop"
+  )
+
+taxonomy_order <- c("Kingdom", "Phylum", "Class", "Order", "Family", "Genus", "Species")
+diff_sum$rank <- factor(diff_sum$rank, levels = taxonomy_order)
+
+diff_assigned <- ggplot(diff_sum, aes(x = rank, y = mean_d)) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  geom_col(fill = "#6C83B5", color = "grey20", width = 0.6) +
+  geom_errorbar(aes(ymin = ci95_l, ymax = ci95_u), width = 0.2) +
+  labs(x = "Taxonomic rank", y = "Full‑length ITS − ITS2 (% assigned)") +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 30, hjust = 1))
+
+diff_assigned
+```
+
+# Fig S7: PacBio trimmed ITS2 assignment by sample
+```{r}
+Trimmed_ITS2_df <- percent_assigned_by_Rank(ps_PacBio_ITS2_filt, Ranks) %>%
+  mutate(platform = "Trimmed_ITS2")
+
+sum_df_ITS2 <- Trimmed_ITS2_df %>%
+  group_by(rank) %>%
+  summarise(
+    mean_pct = mean(pct_assigned, na.rm = TRUE),
+    sd_pct   = sd(pct_assigned, na.rm = TRUE),
+    se_pct   = sd_pct / sqrt(n()),
+    ci_low   = mean_pct - qt(0.975, df = n()-1) * se_pct,
+    ci_up    = mean_pct + qt(0.975, df = n()-1) * se_pct,
+    n = n(),
+    .groups = "drop"
+  )
+
+taxonomy_order <- c("Kingdom", "Phylum", "Class", "Order", "Family", "Genus", "Species")
+sum_df_ITS2$rank <- factor(sum_df_ITS2$rank, levels = taxonomy_order)
+
+PCT_Assigned <- ggplot(sum_df_ITS2, aes(x = rank, y = mean_pct)) +
+  geom_col(position = position_dodge(width = 0.7),
+           width = 0.6, color = "black", linewidth = 0.5) +
+  geom_text(aes(label = round(mean_pct, 1)),  # Add labels rounded to 1 decimal place
+            vjust = -1.0,   # Position labels just above the bars
+            color = "black", # Color of the text labels
+            position = position_dodge(width = 0.7),           
+             size = 4) + 
+  geom_errorbar(aes(ymin = mean_pct - se_pct, ymax = mean_pct + se_pct),
+                position = position_dodge(width = 0.7),
+                width = 0.25, linewidth = 0.5) +
+  geom_col(fill = "pink", color = "grey20", width = 0.6) +
+  labs(x = "Taxonomic Rank",
+       y = "% Assigned") +
+  theme_classic(base_size = 14) +
+  theme(axis.text.x = element_text(angle = 30, hjust = 1))
+
+PCT_Assigned
+```
+
+
+# Fig S3: Sequence length distribution
+```{r}
+ps_Illumina_ITS2
+
+sequence_lengths <- width(ps_Illumina_ITS2@refseq)
+length_df <- data.frame(Length = sequence_lengths)
+
+# Histogram of sequence lengths
+sequence_length_distribution <- ggplot(length_df, aes(x = Length)) +
+  geom_histogram(binwidth = 10, color = "black", linewidth = 0.2, fill = "orange", alpha = 0.7) +
+  labs(title = "Sequence Length Distribution", x = "Sequence Length (bp)", y = "Frequency") +
+  theme_bw()+
+   theme(
+    panel.grid.major = element_blank(),  # Remove major grid lines
+    panel.grid.minor = element_blank()  # Remove minor grid lines
+  )
+
+sequence_length_distribution
+```
+
+```{r}
+ps_PacBio_ITS2_match
+
+sequence_lengths <- width(ps_PacBio_ITS2_match@refseq)
+length_df <- data.frame(Length = sequence_lengths)
+
+# Histogram of sequence lengths
+sequence_length_distribution <- ggplot(length_df, aes(x = Length)) +
+  geom_histogram(binwidth = 10, color = "black", linewidth = 0.2, fill = "pink", alpha = 0.7) +
+  labs(title = "Sequence Length Distribution", x = "Sequence Length (bp)", y = "Frequency") +
+  theme_bw()+
+   theme(
+    panel.grid.major = element_blank(),  # Remove major grid lines
+    panel.grid.minor = element_blank()  # Remove minor grid lines
+  )
+
+sequence_length_distribution
+```
+
+```{r}
+ps_PacBio_Fungi_match
+
+sequence_lengths <- width(ps_PacBio_Fungi_match@refseq)
+length_df <- data.frame(Length = sequence_lengths)
+
+# Histogram of sequence lengths
+sequence_length_distribution <- ggplot(length_df, aes(x = Length)) +
+  geom_histogram(binwidth = 10, color = "black", linewidth = 0.2, fill = "deeppink", alpha = 0.7) +
+  labs(title = "Sequence Length Distribution", x = "Sequence Length (bp)", y = "Frequency") +
+  theme_bw()+
+   theme(
+    panel.grid.major = element_blank(),  # Remove major grid lines
+    panel.grid.minor = element_blank()  # Remove minor grid lines
+  )
+
+sequence_length_distribution
+```
+
+#Fig S8: Ordination plot with ggplot
+```{r}
+ps_Illumina_ITS2_filt
+ps_PacBio_ITS_filt
+ps_trimmed_ITS2_merged
+
+#Transform to relative abundance
+ps_Illumina_ITS2_rel <- microbiome::transform(ps_Illumina_ITS2_filt,"compositional")
+ps_PacBio_Fungi_match_rel <- microbiome::transform(ps_PacBio_ITS_filt,"compositional")
+ps_PacBio_ITS2_rel <- microbiome::transform(ps_trimmed_ITS2_merged,"compositional")
+
+#Make sure sample name match
+common_samples <- intersect(sample_names(ps_Illumina_ITS2_rel), 
+                            sample_names(ps_PacBio_Fungi_match_rel))
+
+ps_Illumina_common <- prune_samples(common_samples, ps_Illumina_ITS2_rel)
+ps_PacBio_common   <- prune_samples(common_samples, ps_PacBio_Fungi_match_rel)
+ps_PacBio_ITS2_common <- prune_samples(common_samples, ps_PacBio_ITS2_rel)
+
+ps_Illumina_common <- prune_taxa(taxa_sums(ps_Illumina_common) > 0, ps_Illumina_common)
+ps_PacBio_common   <- prune_taxa(taxa_sums(ps_PacBio_common) > 0, ps_PacBio_common)
+ps_PacBio_ITS2_common <- prune_taxa(taxa_sums(ps_PacBio_ITS2_common) > 0, ps_PacBio_ITS2_common)
+
+#PCoA with bray-cutis
+ord_ITS <- ordinate(ps_PacBio_common, method="PCoA", distance = "bray")
+p_ord_ITS <- plot_ordination(ps_PacBio_common, ord_ITS, color = "Location", shape = "SampleType") + 
+  geom_point(size = 4, alpha = 0.8) +
+  stat_ellipse(aes(group = Location), type = "norm", linetype = "dashed", size = 1, alpha = 0.5) +
+  scale_color_brewer(palette = "Set2") +
+  labs(
+    title = "PCoA of Full-length ITS",
+    subtitle = paste0("Bray-Curtis distance | Axis 1: ", round(ord_ITS$values$Relative_eig[1]*100, 1), 
+                      "%, Axis 2: ", round(ord_ITS$values$Relative_eig[2]*100, 1), "%"),
+    x = NULL, y = NULL
+  ) +
+  theme_bw(base_size = 14) +
+  theme(
+    panel.grid = element_blank(),
+    legend.position = "right",
+    plot.title = element_text(face = "bold", size = 18),
+    plot.subtitle = element_text(size = 12)
+  )
+p_ord_ITS
+
+ord_trimmedITS2 <- ordinate(ps_PacBio_ITS2_common, method="PCoA", distance = "bray")
+p_ord_trimmedITS <- plot_ordination(ps_PacBio_ITS2_common, ord_trimmedITS2, color = "Location", shape = "SampleType") + 
+  geom_point(size = 4, alpha = 0.8) +
+  stat_ellipse(aes(group = Location), type = "norm", linetype = "dashed", size = 1, alpha = 0.5) +
+  scale_color_brewer(palette = "Set2") +
+  labs(
+    title = "PCoA of Trimmed ITS2",
+    subtitle = paste0("Bray-Curtis distance | Axis 1: ", round(ord_trimmedITS2$values$Relative_eig[1]*100, 1), 
+                      "%, Axis 2: ", round(ord_trimmedITS2$values$Relative_eig[2]*100, 1), "%"),
+    x = NULL, y = NULL
+  ) +
+  theme_bw(base_size = 14) +
+  theme(
+    panel.grid = element_blank(),
+    legend.position = "right",
+    plot.title = element_text(face = "bold", size = 18),
+    plot.subtitle = element_text(size = 12)
+  )
+p_ord_trimmedITS
+
+ord_ITS2 <- ordinate(ps_Illumina_common, method="PCoA", distance = "bray")
+p_ord_ITS2 <- plot_ordination(ps_Illumina_common, ord_ITS2, color = "Location", shape = "SampleType") + 
+  geom_point(size = 4, alpha = 0.8) +
+  stat_ellipse(aes(group = Location), type = "norm", linetype = "dashed", size = 1, alpha = 0.5) +
+  scale_color_brewer(palette = "Set2") +
+  labs(
+    title = "PCoA of ITS2",
+    subtitle = paste0("Bray-Curtis distance | Axis 1: ", round(ord_ITS2$values$Relative_eig[1]*100, 1), 
+                      "%, Axis 2: ", round(ord_ITS2$values$Relative_eig[2]*100, 1), "%"),
+    x = NULL, y = NULL
+  ) +
+  theme_bw(base_size = 14) +
+  theme(
+    panel.grid = element_blank(),
+    legend.position = "right",
+    plot.title = element_text(face = "bold", size = 18),
+    plot.subtitle = element_text(size = 12)
+  )
+p_ord_ITS2
+
+library(gridExtra)
+grid.arrange(p_ord_ITS, p_ord_ITS2, ncol = 2)
+```
+
+##PERMANOVA
+```{r}
+library(vegan)
+
+#Illumina ITS2
+#transform the phyloseq if not yet
+ps <- ps_Illumina_common
+
+df <- t(data.frame(ps@otu_table))
+metadata <- data.frame(ps@sam_data)
+
+#PERMANOVA
+permanova <- adonis2(df ~ SampleType * Location, data = metadata, method = "bray", by = "terms", permutations = 10000)
+print(permanova)
+
+#PacBio full-length ITS
+#transform the phyloseq if not yet
+ps <- ps_PacBio_common
+
+df <- t(data.frame(ps@otu_table))
+metadata <- data.frame(ps@sam_data)
+
+#PERMANOVA
+permanova <- adonis2(df ~ SampleType * Location, data = metadata, method = "bray", by = "terms", permutations = 10000)
+print(permanova)
+
+#Trimmed ITS2
+#transform the phyloseq if not yet
+ps <- ps_PacBio_ITS2_common
+
+df <- t(data.frame(ps@otu_table))
+metadata <- data.frame(ps@sam_data)
+
+#PERMANOVA
+permanova <- adonis2(df ~ SampleType * Location, data = metadata, method = "bray", by = "terms", permutations = 10000)
+print(permanova)
+```
+
+##Mental test and procrustes analysis
+```{r}
+# Compute Bray–Curtis distances
+dist_ITS2 <- phyloseq::distance(ps_Illumina_common, method = "bray")
+dist_ITS <- phyloseq::distance(ps_PacBio_common, method = "bray")
+dist_trimmedITS2 <- phyloseq::distance(ps_PacBio_ITS2_common, method = "bray")
+
+# Mantel test
+mantel_result <- mantel(dist_ITS2, dist_ITS, method = "spearman", permutations = 999)
+print(mantel_result)
+
+mantel_result <- mantel(dist_ITS2, dist_trimmedITS2, method = "spearman", permutations = 999)
+print(mantel_result)
+
+# Procrustes analysis
+## Extract coordinates
+coords_ITS2 <- ord_ITS2$vectors
+coords_ITS <- ord_ITS$vectors
+coords_trimmedITS2 <- ord_trimmedITS2$vectors
+
+## Procrustes analysis: ITS2 vs full-length ITS
+proc <- procrustes(coords_ITS, coords_ITS2, scale = TRUE)
+proc_test <- protest(coords_ITS, coords_ITS2, permutations = 999)
+summary(proc_test)
+
+proc_test$t0
+proc_test$signif
+
+## Procrustes analysis: ITS2 vs trimmed ITS2
+proc <- procrustes(coords_trimmedITS2, coords_ITS2, scale = TRUE)
+proc_test <- protest(coords_trimmedITS2, coords_ITS2, permutations = 999)
+summary(proc_test)
+
+proc_test$t0
+proc_test$signif
+proc_ss  <- 1 - (proc_test$t0)^2 
+proc_ss
+
+# Make the table
+mantel_r <- mantel_result$statistic
+mantel_p <- mantel_result$signif
+proc_r   <- proc_test$t0        # 0.6663367
+proc_p   <- proc_test$signif    # 0.002
+proc_ss  <- 1 - proc_r^2        # 0.5559954
+
+inset_tbl <- data.frame(
+  Metric = c("Mantel (Spearman) on Bray–Curtis", "Procrustes (symmetric)"),
+  Statistic = c(sprintf("r = %.3f", mantel_r),
+                sprintf("r = %.3f (ss = %.3f)", proc_r, proc_ss)),
+  P_value = c(sprintf("%.3f", mantel_p),
+              sprintf("%.3f", proc_p)),
+  stringsAsFactors = FALSE
+)
+
+inset_tbl
+
+#Robustness check
+k <- 15
+coords_ITS2_k <- ord_ITS2$vectors[, 1:k, drop = FALSE]
+coords_ITS_k <- ord_ITS$vectors[, 1:k, drop = FALSE]
+proc_test_k <- protest(coords_ITS_k, coords_ITS2_k, permutations = 999)
+c(r = proc_test_k$t0, p = proc_test_k$signif)
+```
+
+##Fig 2b: Paired Ordination and PERMANOVA
+```{r}
+#Prepare data
+sample_data(ps_Illumina_common)$Workflow <- "ITS2"
+sample_data(ps_PacBio_common)$Workflow  <- "Full-length ITS"
+
+sample_names(ps_Illumina_common) <- paste0(sample_names(ps_Illumina_common), "_Illumina")
+sample_names(ps_PacBio_common)   <- paste0(sample_names(ps_PacBio_common), "_PacBio")
+
+sample_data(ps_Illumina_common)$PairID <- gsub("_Illumina$", "", sample_names(ps_Illumina_common))
+sample_data(ps_PacBio_common)$PairID   <- gsub("_PacBio$", "", sample_names(ps_PacBio_common))
+
+taxa_names(ps_Illumina_common) <- paste0("ITS2_", taxa_names(ps_Illumina_common))
+taxa_names(ps_PacBio_common)   <- paste0("ITSfull_", taxa_names(ps_PacBio_common))
+
+ps_combined <- merge_phyloseq(ps_Illumina_common, ps_PacBio_common)
+ps_combined <- prune_samples(sample_sums(ps_combined) > 0, ps_combined)
+
+#Bray–Curtis distance
+dist.bc <- phyloseq::distance(ps_combined, method = "bray")
+
+adonis2(
+  dist.bc ~ Workflow + SampleType + Location,
+  data = data.frame(sample_data(ps_combined)),
+  permutations = 10000,
+  strata = sample_data(ps_combined)$PairID,
+  by = "terms"
+)
+
+#Plot
+ord <- ordinate(ps_combined, method = "PCoA", distance = "bray")
+paired_ordination <- plot_ordination(ps_combined, ord, shape = "Workflow", color = "Location") + 
+  geom_point(size = 2.5, alpha = 0.8) +
+  facet_wrap(~ SampleType) + 
+  stat_ellipse(aes(group = Workflow), type = "norm", linetype = "dashed", size = 1, alpha = 0.5) +
+  scale_color_brewer(palette = "Set2") +
+  scale_fill_manual(values = c(
+  "Full-length ITS" = "deeppink",
+  "ITS2" = "orange"
+)) +
+  theme_bw(base_size = 14) +
+  theme(
+    panel.grid = element_blank(),
+    legend.position = "right",
+    plot.title = element_text(face = "bold", size = 18),
+    plot.subtitle = element_text(size = 12)
+  )
+paired_ordination + geom_line(aes(group = PairID),color = "grey60", alpha = 0.4)
+
+paired_ordination <- plot_ordination(ps_combined, ord, color = "Workflow", shape = "SampleType") + 
+   geom_point(size = 2.5, alpha = 0.8) +
+   facet_wrap(~ Location) + 
+   stat_ellipse(aes(group = Workflow), type = "norm", linetype = "dashed", size = 1, alpha = 0.5) +
+   scale_color_manual(values = c(
+   "Full-length ITS" = "deeppink",
+   "ITS2" = "orange")) + 
+   scale_fill_manual(values = c(
+   "Full-length ITS" = "deeppink",
+   "ITS2" = "orange")) +
+   theme_bw(base_size = 14) +
+   theme(
+     panel.grid = element_blank(),
+     legend.position = "right",
+     plot.title = element_text(face = "bold", size = 18),
+     plot.subtitle = element_text(size = 12)
+   )
+
+paired_ordination + geom_line(aes(group = PairID),color = "grey60", alpha = 0.4)
+```
+
+##Fig S6: Scatter PCoA
+```{r}
+# Run PCoA
+pcoa_res <- ordinate(ps_combined, method = "PCoA", distance = dist.bc)
+
+# Extract sample scores
+pcoa_df <- as.data.frame(pcoa_res$vectors)
+pcoa_df$SampleID <- rownames(pcoa_df)
+
+# Add metadata
+meta_df <- data.frame(sample_data(ps_combined))
+meta_df$SampleID <- rownames(meta_df)
+
+pcoa_df <- left_join(pcoa_df, meta_df, by = "SampleID")
+
+# Keep only the first two axes
+pcoa_long <- pcoa_df %>%
+  select(PairID, Workflow, Axis.1, Axis.2) %>%
+  pivot_wider(
+    id_cols = PairID,
+    names_from = Workflow,
+    values_from = c(Axis.1, Axis.2)
+  )
+
+# Pearson correlation for PC1
+cor_pc1 <- cor(pcoa_long$Axis.1_ITS2,
+               pcoa_long$`Axis.1_Full-length ITS`,
+               method = "pearson",
+               use = "complete.obs")
+
+r2_pc1 <- cor_pc1^2
+
+ggplot(pcoa_long,
+       aes(x = Axis.1_ITS2, y = `Axis.1_Full-length ITS`)) +
+  geom_point(size = 2, alpha = 0.7) +
+  geom_abline(slope = 1, intercept = 0,
+              linetype = "dashed", color = "grey40") +
+  annotate("text",
+           x = min(pcoa_long$Axis.1_ITS2, na.rm = TRUE),
+           y = max(pcoa_long$`Axis.1_Full-length ITS`, na.rm = TRUE),
+           hjust = 0, vjust = 1,
+           label = paste0("R² = ", round(r2_pc1, 2),
+                          "\nr = ", round(cor_pc1, 2))) +
+  labs(x = "PCoA Axis 1 (ITS2)",
+       y = "PCoA Axis 1 (Full-length ITS)",
+       title = "Paired PCoA Axis 1 comparison") +
+  theme_classic(base_size = 14)
+
+# Pearson correlation for PC2
+cor_pc2 <- cor(pcoa_long$Axis.2_ITS2,
+               pcoa_long$`Axis.2_Full-length ITS`,
+               method = "pearson",
+               use = "complete.obs")
+
+r2_pc2 <- cor_pc2^2
+
+ggplot(pcoa_long,
+       aes(x = Axis.2_ITS2, y = `Axis.2_Full-length ITS`)) +
+  geom_point(size = 2, alpha = 0.7) +
+  geom_abline(slope = 1, intercept = 0,
+              linetype = "dashed", color = "grey40") +
+  annotate("text",
+           x = min(pcoa_long$Axis.2_ITS2, na.rm = TRUE),
+           y = max(pcoa_long$`Axis.2_Full-length ITS`, na.rm = TRUE),
+           hjust = 0, vjust = 1,
+           label = paste0("R² = ", round(r2_pc2, 2),
+                          "\nr = ", round(cor_pc2, 2))) +
+  labs(x = "PCoA Axis 2 (ITS2)",
+       y = "PCoA Axis 2 (Full-length ITS)",
+       title = "Paired PCoA Axis 2 comparison") +
+  theme_classic(base_size = 14)
+
+```
+
+
+#Fig 2b: Scatter compare taxa abundance: ps_Illumina_ITS2 vs. ps_PacBio_Fungi_match do they agree
+##Function: Log relative abundance
+```{r}
+log_relabund_transform <- function(ps, rank, pseudo_count = 1e-4) {
+  library(tidyverse)
+  counts <- otu_table(ps)
+  if (taxa_are_rows(ps)) counts <- t(counts)
+  rel_abund <- sweep(counts, 1, rowSums(counts), "/")
+  log_relabund <- log10(rel_abund + pseudo_count)
+  
+  df <- as.data.frame(log_relabund)
+  df$SampleID <- rownames(df)
+  df_long <- pivot_longer(df, -SampleID, names_to = "FeatureID", values_to = "logRelAbund")
+  
+  tax <- as.data.frame(tax_table(ps))
+  tax$FeatureID <- rownames(tax)
+
+  if (!(rank %in% colnames(tax))) {
+    stop(paste("Taxonomic rank", rank, "not found in taxonomy table."))
+  }
+
+  df_long <- left_join(df_long, tax[, c("FeatureID", rank)], by = "FeatureID") %>%
+    dplyr::rename(Taxon = !!sym(rank)) %>%
+    filter(!is.na(Taxon))
+
+  return(df_long)
+}
+```
+
+##Scatter plot
+```{r}
+ps_Illumina_ITS2_glom <- tax_glom(ps_Illumina_ITS2_filt, taxrank = "genus", NArm=TRUE, bad_empty=c(NA, "", " ", "\t"))
+tax_ITS2_glom <- data.frame(ps_Illumina_ITS2_glom@tax_table)
+
+ps_PacBio_ITS_match_glom <- tax_glom(ps_PacBio_ITS_filt, taxrank = "Genus", NArm=TRUE, bad_empty=c(NA, "", " ", "\t"))
+tax_ITS_glom <- data.frame(ps_PacBio_ITS_match_glom@tax_table)
+
+# For each taxa rank
+rank_ITS <- c("Phylum", "Class", "Order", "Family", "Genus","Species")
+rank_ITS2 <- c("phylum", "class", "order", "family", "genus","species")
+
+# Store merged data per rank
+merged_list <- list()
+
+for (i in seq_along(rank_ITS)) {
+  logrel_PacBio <- log_relabund_transform(ps_PacBio_ITS_match_glom, rank = rank_ITS[i])
+  logrel_Illumina <- log_relabund_transform(ps_Illumina_ITS2_glom, rank = rank_ITS2[i])
+  
+  merged <- full_join(logrel_PacBio, logrel_Illumina, by = c("SampleID", "Taxon"), suffix = c("_PacBio", "_Illumina"))
+  
+  # NEW: Keep only rows where both values are not NA
+  merged <- merged %>% filter(!is.na(logRelAbund_PacBio) & !is.na(logRelAbund_Illumina))
+  
+  merged$Rank <- rank_ITS[i]
+  merged_list[[rank_ITS[i]]] <- merged
+}
+
+# Combine all ranks into one data frame
+merged_all <- bind_rows(merged_list)
+
+plot_rank_with_margins <- function(df, rank_label) {
+  p <- ggplot(df, aes(x = logRelAbund_PacBio, y = logRelAbund_Illumina)) +
+    geom_point(alpha = 0.4, color = "#2c3e50") +
+    geom_smooth(method = "lm", se = FALSE, color = "#e74c3c") +
+    stat_cor(method = "spearman", 
+             aes(label = paste(..r.label.., ..p.label.., sep = "~`,`~")),
+             label.x = min(df$logRelAbund_PacBio, na.rm = TRUE), 
+             label.y = max(df$logRelAbund_Illumina, na.rm = TRUE)) +
+    theme_classic(base_size = 14) +
+    labs(title = paste("Long vs Short Read Log Relative Abundance at", rank_label),
+         x = "Long read", y = "Short read") +
+  theme(panel.border = element_rect(color = "black", fill = NA), # Adds an outer frame
+        axis.line = element_line(color = "black"),               # Keeps axis lines
+        panel.grid = element_blank())                            # Ensures no inner grid lines
+  
+  # Add marginal histograms
+  ggMarginal(p, type = "density", fill = "gray70", alpha = 0.5)
+}
+
+```
+
+##Fig 3b: P-value scatter by Location: from merged_list
+```{r}
+#At genus level match
+overlapping_genus <- merged_list$Genus
+
+#Add location
+overlapping_genus <- overlapping_genus %>%
+  left_join(
+    metadata_ITS %>% select(Label, Location),
+    by = c("SampleID" = "Label")
+  )
+
+table(overlapping_genus$Location)
+
+library(broom)   # For tidy model results
+library(purrr)
+
+# Linear model
+# Function to run per taxon and method
+run_differential_abundance <- function(df, method_col) {
+  df %>%
+    group_by(Taxon) %>%
+    nest() %>%
+    mutate(
+      model = map(data, ~ lm(reformulate("Location", method_col), data = .x)),
+      tidied = map(model, tidy)
+    ) %>%
+    unnest(tidied) %>%
+    filter(term != "(Intercept)") %>%
+    select(Taxon, term, estimate, p.value)
+}
+
+#Run model for both pipelines
+res_pacbio <- run_differential_abundance(overlapping_genus, "logRelAbund_PacBio") %>%
+  mutate(
+    fdr_pacbio = p.adjust(p.value, method = "BH"),
+    signed_log10p_pacbio = sign(estimate) * -log10(p.value)
+  )
+
+res_illumina <- run_differential_abundance(overlapping_genus, "logRelAbund_Illumina") %>%
+  mutate(
+    fdr_illumina = p.adjust(p.value, method = "BH"),
+    signed_log10p_illumina = sign(estimate) * -log10(p.value)
+  )
+
+
+#Merge results
+comparison_df <- res_pacbio %>%
+  rename(
+    estimate_pacbio = estimate,
+    pval_pacbio = p.value
+  ) %>%
+  inner_join(
+    res_illumina %>%
+      rename(
+        estimate_illumina = estimate,
+        pval_illumina = p.value
+      ),
+    by = c("Taxon", "term")
+  ) %>%
+  mutate(
+    significant = ifelse(
+      fdr_pacbio < 0.05 | fdr_illumina < 0.05,
+      "FDR < 0.05",
+      "n.s."
+    )
+  )
+
+#Make the P-value vs P-value Plot
+p_agreement_eachLocation <- ggplot(comparison_df,
+       aes(x = estimate_illumina,
+           y = estimate_pacbio,
+           color = significant)) +
+  geom_point(size = 2.5, alpha = 0.8) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "gray70") +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray70") +
+  geom_text(
+    data = comparison_df %>% filter(significant == "FDR < 0.05"),
+    aes(label = Taxon),
+    size = 3, hjust = 0, vjust = 1
+  ) +
+  #facet_wrap(~ term, scales = "free") +
+  scale_color_manual(values = c("FDR < 0.05" = "firebrick", "n.s." = "gray60")) +
+  labs(
+    x = "Effect size (ITS2 – Illumina)",
+    y = "Effect size (Full-length ITS – PacBio)",
+    color = "Significance"
+  ) +
+  theme_classic(base_size = 14)
+
+p_agreement_eachLocation 
+
+# p-value vs p-value plot
+library(ggrepel)  # for nicer labels (optional)
+
+#Compute Spearman Correlation
+spearman_global <- cor.test(
+  comparison_df$signed_log10p_illumina,
+  comparison_df$signed_log10p_pacbio,
+  method = "spearman"
+)
+# Extract values
+rho_value <- round(spearman_global$estimate, 2)
+p_value <- signif(spearman_global$p.value, 2)
+
+# Identify top 25 most divergent significant taxa for labeling
+top_taxa <- comparison_df %>%
+  filter(significant == "FDR < 0.05") %>%
+  mutate(abs_diff = abs(signed_log10p_illumina - signed_log10p_pacbio)) %>%
+  group_by(Taxon) %>%
+  slice_max(order_by = abs_diff, n = 1) %>%   # pick most divergent per Taxon
+  ungroup() %>%
+  slice_max(order_by = abs_diff, n = 25)      # now select top 25 across all taxa
+
+#Plot
+p_signed_log10p <- ggplot(comparison_df, aes(x = signed_log10p_illumina, y = signed_log10p_pacbio)) +
+  # Base points
+  geom_point(data = subset(comparison_df, significant == "n.s."),
+             color = "gray70", size = 1.2, alpha = 0.6) +
+  geom_point(data = subset(comparison_df, significant == "FDR < 0.05"),
+             color = "firebrick", size = 1.5, alpha = 0.9) +
+  # Label top 10 divergent taxa only
+  geom_text_repel(
+    data = top_taxa,
+    aes(label = Taxon),
+    size = 3,
+    box.padding = 0.4,
+    point.padding = 0.2,
+    segment.color = "gray60",
+    segment.size = 0.3,
+    force = 1.2,
+    max.overlaps = Inf,
+    fontface = "italic",    # or "plain" if names are not taxonomic
+    color = "firebrick"
+  ) +
+  # Reference lines
+  geom_vline(xintercept = 0, linetype = "dashed", color = "darkred") +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "darkred") +
+  #geom_abline(slope = 1, intercept = 0, linetype = "dotted", color = "gray60") +
+  #geom_smooth(method = "lm", color = "black", se = FALSE, linetype = "solid") +
+  # Spearman annotation
+  annotate(
+    "text",
+    x = min(comparison_df$signed_log10p_illumina, na.rm = TRUE),
+    y = max(comparison_df$signed_log10p_pacbio, na.rm = TRUE),
+    label = paste0("ρ = ", rho_value, "\np = ", format(p_value, scientific = TRUE)),
+    hjust = 0, vjust = 1.2, size = 5
+  ) +
+  # Theme and labels
+  theme_classic(base_size = 14) +
+  labs(
+    x = expression("Signed "*-log[10]*"(p) Illumina"),
+    y = expression("Signed "*-log[10]*"(p) PacBio")
+  )
+
+p_signed_log10p
+
+cor_results <- comparison_df %>%
+  group_by(term) %>%
+  summarise(
+    spearman_r = cor(signed_log10p_illumina, signed_log10p_pacbio, method = "spearman"),
+    p_value = cor.test(signed_log10p_illumina, signed_log10p_pacbio, method = "spearman")$p.value,
+    .groups = "drop"
+  )
+
+print(cor_results)
+```
+##Fig 3b: P-value scatter: Compare locations
+```{r}
+# Load necessary libraries
+library(dplyr)
+library(tidyr)
+library(broom)
+library(purrr)
+library(ggplot2)
+library(ggrepel)
+
+# Step 1: Define all pairwise combinations of locations
+location_pairs <- combn(
+  unique(overlapping_genus$Location) %>% setdiff("Control"),
+  2,
+  simplify = FALSE
+)
+
+# Step 2: Create function to run per-method pairwise comparisons
+run_pairwise_comparisons <- function(df, method_col, method_label) {
+  map_dfr(location_pairs, function(pair) {
+    loc1 <- pair[1]
+    loc2 <- pair[2]
+    comp_label <- paste(loc1, "vs", loc2, sep = "_")
+
+    # Subset and define reference group
+    sub_df <- df %>%
+      filter(Location %in% c(loc1, loc2)) %>%
+      mutate(Location = factor(Location, levels = c(loc1, loc2)))  # loc1 = reference
+
+    if (nrow(sub_df) == 0) return(tibble())  # skip empty groups
+
+    sub_df %>%
+      group_by(Taxon) %>%
+      nest() %>%
+      mutate(
+        model = map(data, ~ tryCatch(
+          lm(reformulate("Location", method_col), data = .x),
+          error = function(e) NULL
+        )),
+        tidied = map(model, ~ if (!is.null(.x)) tidy(.x) else NULL)
+      ) %>%
+      unnest(tidied) %>%
+      filter(term != "(Intercept)", !is.na(estimate), !is.na(p.value)) %>%
+      mutate(
+        signed_log10p = sign(estimate) * -log10(p.value),
+        comparison_group = comp_label,
+        method = method_label
+      ) %>%
+      select(Taxon, comparison_group, estimate, p.value, signed_log10p, method)
+  })
+}
+
+# Step 3: Run the function for both pipelines
+res_pacbio <- run_pairwise_comparisons(overlapping_genus, "logRelAbund_PacBio", "PacBio")
+res_illumina <- run_pairwise_comparisons(overlapping_genus, "logRelAbund_Illumina", "Illumina")
+
+# Step 4: Adjust p-values (FDR) within each comparison group
+res_pacbio <- res_pacbio %>%
+  group_by(comparison_group) %>%
+  mutate(fdr_pacbio = p.adjust(p.value, method = "BH")) %>%
+  ungroup()
+
+res_illumina <- res_illumina %>%
+  group_by(comparison_group) %>%
+  mutate(fdr_illumina = p.adjust(p.value, method = "BH")) %>%
+  ungroup()
+
+# Step 5: Merge both results by Taxon + comparison group
+comparison_df <- res_pacbio %>%
+  rename(
+    estimate_pacbio = estimate,
+    log10p_pacbio = signed_log10p
+  ) %>%
+  inner_join(
+    res_illumina %>%
+      rename(
+        estimate_illumina = estimate,
+        log10p_illumina = signed_log10p
+      ),
+    by = c("Taxon", "comparison_group")
+  ) %>%
+  mutate(
+    significant = ifelse(fdr_pacbio < 0.05 | fdr_illumina < 0.05, "FDR < 0.05", "n.s.")
+  )
+
+# Step 6: Define safe Spearman correlation function
+safe_spearman <- function(x, y) {
+  if (length(x) < 3 || length(unique(x)) == 1 || length(unique(y)) == 1) {
+    return(c(rho = NA, p = NA))
+  }
+  test <- suppressWarnings(cor.test(x, y, method = "spearman"))
+  return(c(rho = as.numeric(test$estimate), p = as.numeric(test$p.value)))
+}
+
+# Step 7: Compute correlation per group
+cor_summary <- comparison_df %>%
+  group_split(comparison_group) %>%
+  map_dfr(function(df_group) {
+    cg <- unique(df_group$comparison_group)
+    
+    if (!all(c("log10p_illumina", "log10p_pacbio") %in% colnames(df_group))) {
+      message("Missing columns in: ", cg)
+      return(tibble(comparison_group = cg, spearman_r = NA, spearman_p = NA))
+    }
+
+    if (sum(complete.cases(df_group$log10p_illumina, df_group$log10p_pacbio)) < 3) {
+      message("Too few valid points in: ", cg)
+      return(tibble(comparison_group = cg, spearman_r = NA, spearman_p = NA))
+    }
+
+    result <- safe_spearman(df_group$log10p_illumina, df_group$log10p_pacbio)
+    tibble(comparison_group = cg,
+           spearman_r = result["rho"],
+           spearman_p = result["p"])
+  }) %>%
+  mutate(spearman_fdr = p.adjust(spearman_p, method = "BH"))
+
+# Step 8: Annotate and plot
+comparison_df_annotated <- comparison_df %>%
+  left_join(cor_summary, by = "comparison_group")
+
+# Step 9: Final plot
+p_pvalue_group <- ggplot(comparison_df_annotated, aes(x = log10p_illumina, y = log10p_pacbio, color = significant)) +
+  geom_point(alpha = 0.8) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray60") +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "gray60") +
+  geom_text_repel(
+    data = filter(comparison_df_annotated, significant == "FDR < 0.05"),
+    aes(label = Taxon), size = 3, max.overlaps = 100
+  ) +
+  facet_wrap(~comparison_group, scales = "free") +
+  geom_text(
+    data = cor_summary,
+    aes(x = -Inf, y = Inf,
+        label = paste0("ρ = ", round(spearman_r, 2),
+                       "\nFDR = ", signif(spearman_fdr, 2))),
+    inherit.aes = FALSE,
+    hjust = -0.1, vjust = 1.2, size = 4
+  ) +
+  scale_color_manual(values = c("FDR < 0.05" = "firebrick", "n.s." = "skyblue")) +
+  labs(
+    title = "Signed –log₁₀(p-value) agreement across pipelines",
+    x = expression("Signed "*-log[10]*"(p) (ITS2 – Illumina)"),
+    y = expression("Signed "*-log[10]*"(p) (Full-length ITS – PacBio)"),
+    color = "Significance"
+  ) +
+  theme_minimal(base_size = 14)
+
+p_pvalue_group
+
+#Summary plot from Spearman correlations
+cor_summary <- cor_summary %>%
+  mutate(sig_flag = ifelse(spearman_fdr < 0.05, "FDR < 0.05", "n.s."))
+
+summary_plot <- cor_summary %>%
+  ggplot(aes(x = reorder(comparison_group, spearman_r),
+             y = spearman_r,
+             fill = sig_flag)) +
+  geom_bar(stat = "identity") +
+  geom_text(aes(label = round(spearman_r, 2)), hjust = -0.1, size = 3.5) +
+  coord_flip() +
+  scale_fill_manual(values = c("FDR < 0.05" = "firebrick", "n.s." = "gray70")) +
+  theme_bw(base_size = 14) +
+  labs(
+    title = "Agreement between sequencing pipelines across location comparisons",
+    x = "Pairwise Comparison",
+    y = expression("Spearman's " * rho),
+    fill = "Significance"
+  )
+summary_plot 
+```
+
+
+##Function: clr transformer
+```{r}
+# CLR transformation helper
+clr_transform <- function(ps, rank) {
+  library(phyloseq)
+  library(tidyverse)
+  library(compositions)
+  
+  counts <- otu_table(ps)
+  if (taxa_are_rows(ps)) counts <- t(counts)
+  
+  # Add pseudo-count to avoid log(0)
+  counts <- counts + 1
+  
+  # CLR transform
+  clr_mat <- clr(counts)
+  df <- as.data.frame(clr_mat)
+  df$SampleID <- rownames(df)
+  
+  # Convert to long format
+  df_long <- pivot_longer(df, -SampleID, names_to = "FeatureID", values_to = "CLR")
+  
+  # Extract taxonomy
+  tax <- as.data.frame(tax_table(ps))
+  tax$FeatureID <- rownames(tax)
+  
+  # Join taxonomy at specified rank
+  df_long <- left_join(df_long, tax[, c("FeatureID", rank)], by = "FeatureID")
+  df_long <- df_long %>%
+    rename(Taxon = all_of(rank)) %>%
+    filter(!is.na(Taxon))  # Optionally drop unassigned
+
+  return(df_long)
+}
+```
+
+##Scatter plot
+```{r}
+# Store merged data per rank
+merged_list <- list()
+
+for (i in seq_along(rank_ITS)) {
+  CLR_PacBio <- clr_transform(ps_PacBio_ITS_match_glom, rank = rank_ITS[i])
+  CLR_Illumina <- clr_transform(ps_Illumina_ITS2_glom, rank = rank_ITS2[i])
+  
+  merged <- full_join(CLR_PacBio, CLR_Illumina, by = c("SampleID", "Taxon"), suffix = c("_PacBio", "_Illumina"))
+  
+  # NEW: Keep only rows where both CLR values are not NA
+  merged <- merged %>% filter(!is.na(CLR_PacBio) & !is.na(CLR_Illumina))
+  
+  merged$Rank <- rank_ITS[i]
+  merged_list[[rank_ITS[i]]] <- merged
+}
+
+# Combine all ranks into one data frame
+merged_all <- bind_rows(merged_list)
+```
+
+#Fig 3a: Box plot: Spearman correlation of CLR-transformed abundance for each sample
+```{r}
+genus_data <- merged_all %>% filter(Rank == "Genus")
+
+#Correlation data.frame
+sample_correlations <- genus_data %>%
+  group_by(SampleID) %>%
+  summarize(
+    Spearman_rho = cor(CLR_PacBio, CLR_Illumina, method = "spearman", use = "complete.obs"),
+    n_taxa = n()
+  ) %>%
+  arrange(desc(Spearman_rho))
+
+#Add grouping columns
+metadata_clean <- metadata_ITS %>%
+  select(Label, SampleType, Location)
+
+sample_correlations <- left_join(sample_correlations, metadata_clean, by = c("SampleID" = "Label"))
+summary(sample_correlations)
+
+#Group by sample type
+sample_correlations <- sample_correlations %>%
+  mutate(SampleType = case_when(
+    SampleType == "swab" ~ "Swab",
+    SampleType == "air" ~ "Air",
+    SampleType == "NegCon" ~ "NegCon",
+    SampleType == "PosCon" ~ "PosCon"
+  ))
+
+sd(sample_correlations$Spearman_rho, na.rm = TRUE)
+mean(sample_correlations$Spearman_rho, na.rm = TRUE)
+
+shapiro.test(sample_correlations$Spearman_rho)
+
+#Plot
+box_Location <- ggplot(sample_correlations, aes(x = Location, y = Spearman_rho)) +
+  geom_boxplot(fill = "lightgray", outlier.shape = NA) +
+  geom_jitter(aes(color = Location), width = 0.2, alpha = 0.8, size = 2) +
+  theme_classic(base_size = 14) +
+  scale_color_brewer(palette = "Set2", drop = FALSE) +
+  theme(panel.border = element_rect(color = "black", fill = NA), # Adds an outer frame
+        axis.line = element_line(color = "black"),               # Keeps axis lines
+        panel.grid = element_blank()) +                            # Ensures no inner grid lines
+  labs(title = "Spearman correlation (Genus)",
+       x = "Location", y = "Spearman Coefficient") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+box_Location
+
+box_sampletype <- ggplot(sample_correlations, aes(x = SampleType, y = Spearman_rho)) +
+  geom_boxplot(fill = "lightgray", outlier.shape = NA) +
+  geom_jitter(aes(color = Location), width = 0.2, alpha = 0.8, size = 2) +
+  theme_classic(base_size = 14) +
+  scale_color_brewer(palette = "Set2", drop = FALSE) +
+  theme(panel.border = element_rect(color = "black", fill = NA), # Adds an outer frame
+        axis.line = element_line(color = "black"),               # Keeps axis lines
+        panel.grid = element_blank()) +                            # Ensures no inner grid lines
+  labs(title = "Spearman correlation (Genus)",
+       x = "Sample Type", y = "Spearman Coefficient") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+box_sampletype
+```
+#Correlation of most abundant
+```{r}
+genus_abundance <- psmelt(ps_PacBio_ITS_match_glom) %>%
+  group_by(Genus) %>%
+  summarize(mean_abundance = mean(Abundance / sum(Abundance)))
+
+top_genera <- genus_abundance %>%
+  slice_head(n = 100) %>%
+  pull(Genus)
+
+genus_abundant <- genus_data %>%
+  filter(Taxon %in% top_genera)
+
+sample_correlations_abundant <- genus_abundant %>%
+  group_by(SampleID) %>%
+  summarize(
+    Spearman_rho = cor(CLR_PacBio, CLR_Illumina,
+                       method = "spearman",
+                       use = "complete.obs"),
+    n_taxa = n()
+  ) %>%
+  arrange(desc(Spearman_rho))
+
+summary(sample_correlations_abundant$Spearman_rho)
+```
+
+
+#ANOVA spearman r
+```{r}
+library(car)
+leveneTest(Spearman_rho ~ SampleType, data = sample_correlations)
+leveneTest(Spearman_rho ~ Location, data = sample_correlations)
+
+anova_type <- aov(Spearman_rho ~ SampleType, data = sample_correlations)
+summary(anova_type)
+TukeyHSD(anova_type)
+
+anova_location <- aov(Spearman_rho ~ Location, data = sample_correlations)
+summary(anova_location)
+TukeyHSD(anova_location)
+
+anova_all <- aov(Spearman_rho ~ Location + SampleType, data = sample_correlations)
+summary(anova_all)
+TukeyHSD(anova_all)
+```
+#Fig 3c: Health-related genera: 
+## Prepare data
+```{r}
+bubble_data <- genus_data %>%
+  left_join(metadata_ITS, by = c("SampleID" = "Label")) %>%
+  pivot_longer(cols = c(CLR_PacBio, CLR_Illumina), 
+               names_to = "Method", values_to = "CLR_Abundance")
+
+bubble_data$Method[bubble_data$Method == "CLR_PacBio"] <- "Full-length ITS"
+bubble_data$Method[bubble_data$Method == "CLR_Illumina"] <- "ITS2"
+
+#Filter taxa of interest
+taxa_of_interest <- c(
+  # Pathogens
+  "Candida", "Aspergillus", "Cryptococcus", "Fusarium", "Trichosporon", 
+  "Rhizopus", "Mucor", "Scedosporium", "Histoplasma", "Coccidioides",
+  
+  # Food spoilage
+  "Penicillium", "Cladosporium", "Alternaria", "Geotrichum", "Botrytis", 
+  "Wallemia",
+  
+  # Indoor/environmental molds
+  "Stachybotrys", "Chaetomium", "Acremonium", "Trichoderma", 
+  "Epicoccum", "Ulocladium"
+)
+
+target_genera <- c("Bipolaris", "Blastomyces",
+  "Botrytis", "Candida", "Chaetomium", "Clavispora", "Coccidioides",
+  "Cryptococcus", "Debaryomyces", "Drechslera", "Eurotium", 
+  "Histoplasma",  "Mucor", "Phoma", "Pichia", "Puccinia",
+  "Rhizopus", "Rhodotorula", "Saccharomyces", "Scopulariopsis", "Stachybotrys","Stemphylium", "Epicoccum", "Aureobasidium","Trichophyton", "Ustilago", "Malassezia", "Wallemia", "Wickerhamomyces","Bjerkandera", "Trichoderma","Alternaria",  "Fusarium","Aspergillus", "Penicillium", "Cladosporium")
+
+bubble_data <- bubble_data %>% filter(Taxon %in% target_genera)
+
+#Plot by location
+bubble_summary <- bubble_data %>%
+  group_by(Taxon, Location, Method, SampleType) %>%
+  summarize(
+    CLR_Abundance = mean(CLR_Abundance, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+#Plot
+# Reorder Taxon by target list
+bubble_summary$Taxon <- factor(bubble_summary$Taxon, levels = target_genera)
+```
+##Heatmap
+```{r}
+library(pheatmap)
+library(gridExtra)
+library(RColorBrewer)
+
+heatmap_summary <- bubble_summary %>%
+  mutate(
+    Location = factor(Location, levels = c("Home1","Home2","Dorm","Lab1", "Lab2","Control")),
+    Method   = factor(Method,   levels = c("Full-length ITS","ITS2")),
+    SampleType = factor(SampleType, levels = c("air","swab","PosCon","NegCon"))
+  )
+
+heatmap_summary <- heatmap_summary %>%
+  mutate(LocMethod = paste(Location, Method, sep = "_"))
+
+#wide matrix: rows = Taxon, cols = LocMethod
+mat_loc <- heatmap_summary %>%
+  select(Taxon, LocMethod, CLR_Abundance) %>%
+  mutate(CLR_Abundance = suppressWarnings(as.numeric(CLR_Abundance))) %>%
+  pivot_wider(
+    names_from  = LocMethod,
+    values_from = CLR_Abundance,
+    values_fn   = list(CLR_Abundance = ~ mean(.x, na.rm = TRUE)),  # aggregate duplicates
+    values_fill = 0
+  ) %>%
+  as.data.frame()
+
+row.names(mat_loc) <- mat_loc$Taxon
+mat_loc <- mat_loc[, -1]
+
+# handle missing values
+mat_loc[is.na(mat_loc)] <- 0
+
+#Heatmap: by SampleType
+heatmap_summary <- heatmap_summary %>%
+  mutate(TypeMethod = paste(SampleType, Method, sep = "_"))
+
+#wide matrix: rows = Taxon, cols = LocMethod
+mat_type <- heatmap_summary %>%
+  select(Taxon, TypeMethod, CLR_Abundance) %>%
+  mutate(CLR_Abundance = suppressWarnings(as.numeric(CLR_Abundance))) %>%
+  pivot_wider(
+    names_from  = TypeMethod,
+    values_from = CLR_Abundance,
+    values_fn   = list(CLR_Abundance = ~ mean(.x, na.rm = TRUE)),  # aggregate duplicates
+    values_fill = 0
+  ) %>%
+  as.data.frame()
+
+row.names(mat_type) <- mat_type$Taxon
+mat_type <- mat_type[, -1]
+
+# handle missing values
+mat_type[is.na(mat_type)] <- 0
+
+#Set color scale
+#Global range
+rng  <- range(c(mat_loc, mat_type), na.rm = TRUE)   # c(-0.282, 11.252)
+gmin <- rng[1]
+gmax <- rng[2]
+
+# Shared breaks & colors (sequential)
+n_breaks <- 100
+breaks   <- seq(gmin, gmax, length.out = n_breaks + 1)  # 101 edges for 100 color bins
+clr_pal  <- colorRampPalette(c("#F7F7F7", "#B2182B"))(n_breaks)
+
+# heatmap: by location
+## column annotations: Location & Method
+ann_col_loc <- data.frame(
+  Location = str_split_fixed(colnames(mat_loc), "_", 2)[ , 1],
+  Method   = str_split_fixed(colnames(mat_loc), "_", 2)[ , 2]
+)
+rownames(ann_col_loc) <- colnames(mat_loc)
+
+loc_cols <- c("Control" = brewer.pal(8, "Set2")[1],
+              "Dorm" = brewer.pal(8, "Set2")[2],
+              "Home1" = brewer.pal(8, "Set2")[3],
+              "Home2" = brewer.pal(8, "Set2")[4],
+              "Lab1" = brewer.pal(8, "Set2")[5],
+              "Lab2" = brewer.pal(8, "Set2")[6])
+
+method_cols <- c("Full-length ITS" = brewer.pal(8, "Set2")[7],
+                 "ITS2"  = brewer.pal(8, "Set2")[8])
+
+ann_colors_loc <- list(Location = loc_cols, Method = method_cols)
+
+##Plot
+heatmap_byLocation <- pheatmap(mat_loc, cellwidth = 10, cellheight = 10, color = clr_pal, breaks = breaks, cluster_rows = FALSE, cluster_cols = FALSE, border_color = NA, display_numbers = FALSE, fontsize_row = 9, fontsize_col = 8, main = "CLR Abundance of Health‑related Genera", annotation_col = ann_col_loc, annotation_colors = ann_colors_loc, legend = TRUE)
+
+heatmap_byLocation
+
+# heatmap: by location
+# column annotations: Location & Method
+ann_col_type <- data.frame(
+  SampleType = str_split_fixed(colnames(mat_type), "_", 2)[ , 1],
+  Method   = str_split_fixed(colnames(mat_type), "_", 2)[ , 2]
+)
+rownames(ann_col_type) <- colnames(mat_type)
+
+type_cols <- c("NegCon" = brewer.pal(8, "Set1")[1],
+              "PosCon" = brewer.pal(8, "Set1")[2],
+              "swab" = brewer.pal(8, "Set1")[3],
+              "air" = brewer.pal(8, "Set1")[4])
+
+method_cols <- c("Full-length ITS" = brewer.pal(8, "Set2")[7],
+                 "ITS2"  = brewer.pal(8, "Set2")[8])
+
+ann_colors_type <- list(SampleType = type_cols, Method = method_cols)
+
+#Order samples
+desired <- c("NegCon_Full-length ITS", "NegCon_ITS2", "PosCon_Full-length ITS", "PosCon_ITS2", "swab_Full-length ITS", "swab_ITS2", "air_Full-length ITS","air_ITS2")
+
+#Reorder data
+mat_type <- mat_type[, desired]
+ann_col_type <- ann_col_type[desired, ]
+
+##Plot
+heatmap_bySampleType <- pheatmap(mat_type, cellwidth = 10, cellheight = 10, color = clr_pal, breaks = breaks, cluster_rows = FALSE, cluster_cols = FALSE, border_color = NA, display_numbers = FALSE, fontsize_row = 9, fontsize_col = 8, main = "CLR Abundance of Health-related Genera", annotation_col = ann_col_type, annotation_colors = ann_colors_type, legend = TRUE)
+
+heatmap_bySampleType
+```
+
+## Statistics: wilcox test
+```{r}
+library(dplyr)
+#Normality test
+clr_wide <- bubble_data %>%
+  select(SampleID, Taxon, Location, SampleType, Method, CLR_Abundance) %>%
+  pivot_wider(names_from = Method, values_from = CLR_Abundance)
+
+results <- clr_wide %>%
+  group_by(Taxon) %>%
+  summarize(
+    n = n(),
+    shapiro_p_ITS = if (n() >= 3) shapiro.test(`Full-length ITS`)$p.value else NA,
+    shapiro_p_ITS2 = if (n() >= 3) shapiro.test(ITS2)$p.value else NA,
+    test = case_when(
+      !is.na(shapiro_p_ITS) & !is.na(shapiro_p_ITS2) &
+      shapiro_p_ITS > 0.05 & shapiro_p_ITS2 > 0.05 ~ "t-test",
+      TRUE ~ "wilcox"
+    ),
+    p_value = case_when(
+      test == "t-test" ~ t.test(`Full-length ITS`, ITS2, paired = TRUE)$p.value,
+      test == "wilcox" ~ wilcox.test(`Full-length ITS`, ITS2, paired = TRUE)$p.value,
+      TRUE ~ NA_real_
+    )
+  ) %>%
+  mutate(p_adj = p.adjust(p_value, method = "BH"))  # FDR correction
+
+#Wilcox-test to compare full-length ITS vs ITS2
+wilcox_results <- clr_wide %>%
+  group_by(Taxon) %>%
+  summarize(
+    n = n(),
+    p_value = tryCatch(
+      wilcox.test(`Full-length ITS`, ITS2, paired = TRUE)$p.value,
+      error = function(e) NA
+    )
+  ) %>%
+  ungroup() %>%
+  mutate(
+    p_adj = p.adjust(p_value, method = "BH"),  # adjust for multiple testing
+    significance = case_when(
+      p_adj < 0.001 ~ "***",
+      p_adj < 0.01  ~ "**",
+      p_adj < 0.05  ~ "*",
+      TRUE ~ ""
+    )
+  )
+
+#compare within sample type or location
+library(dplyr)
+library(purrr)
+library(tidyr)
+
+# Step 1: Group and nest data by location
+wilcox_results_location <- clr_wide %>%
+  group_by(Taxon, Location) %>%
+  filter(!is.na(`Full-length ITS`) & !is.na(ITS2)) %>%  # remove NAs
+  nest() %>%
+  mutate(
+    test_result = map(data, ~ tryCatch(
+      wilcox.test(.x$`Full-length ITS`, .x$ITS2, paired = TRUE),
+      error = function(e) NULL
+    )),
+    p_value = map_dbl(test_result, ~ ifelse(is.null(.x), NA, .x$p.value))
+  ) %>%
+  ungroup() %>%
+  select(Taxon, Location, p_value) %>%
+  mutate(
+    p_adj = p.adjust(p_value, method = "BH"),  # adjust for multiple testing
+    significance = case_when(
+      p_adj < 0.001 ~ "***",
+      p_adj < 0.01  ~ "**",
+      p_adj < 0.05  ~ "*",
+      TRUE ~ ""
+    )
+  )
+
+# Step 2: Group and nest data by sample type
+wilcox_results_sampletype <- clr_wide %>%
+  group_by(Taxon, SampleType) %>%
+  filter(!is.na(`Full-length ITS`) & !is.na(ITS2)) %>%  # remove NAs
+  nest() %>%
+  mutate(
+    test_result = map(data, ~ tryCatch(
+      wilcox.test(.x$`Full-length ITS`, .x$ITS2, paired = TRUE),
+      error = function(e) NULL
+    )),
+    p_value = map_dbl(test_result, ~ ifelse(is.null(.x), NA, .x$p.value))
+  ) %>%
+  ungroup() %>%
+  select(Taxon, SampleType, p_value) %>%
+  mutate(
+    p_adj = p.adjust(p_value, method = "BH"),  # adjust for multiple testing
+    significance = case_when(
+      p_adj < 0.001 ~ "***",
+      p_adj < 0.01  ~ "**",
+      p_adj < 0.05  ~ "*",
+      TRUE ~ ""
+    )
+  )
+
+wilcox_results_sampletype
+
+```
+
+##Scatter plot: correlation
+```{r}
+# Set desired order here
+desired_location_order <- c("Control","Dorm", "Home1", "Home2", "Lab1", "Lab2")
+clr_wide$Location <- factor(clr_wide$Location, levels = desired_location_order)
+
+# Step 2: Scatter plot of CLR abundances between platforms
+scatter_healthtaxa <- ggplot(clr_wide, aes(x = `Full-length ITS`, y = ITS2, color = Location)) +
+  geom_point(alpha = 0.8, size = 2) +
+   geom_smooth(method = "lm", color = "gray20", se = FALSE) +
+   geom_abline(slope = 1, intercept = 0, linetype = "dotdash", color = "gray70") +
+   scale_color_brewer(palette = "Set2", drop = FALSE) +
+   facet_wrap(~SampleType) +
+   #geom_text_repel(data = filter(clr_wide, Taxon %in% sig_taxa), aes(label = Taxon), size = 3, max.overlaps = Inf, box.padding = 0.3, point.padding = 0.3) +
+  stat_cor(
+    method = "spearman",
+    aes(label = paste(..rr.label.., sep = "~`,`~")),
+    size = 5, label.x = 0.5
+  ) +
+  labs(
+    x = "CLR Abundance (Full-length ITS)",
+    y = "CLR Abundance (ITS2)",
+    title = "Correlation of Genus-Level CLR Abundance Across Platforms",
+    subtitle = "Each point is a genus in a sample"
+  ) +
+  theme_bw(base_size = 14)
+
+scatter_healthtaxa
+```
+
+
+#Fig 1b: Top 20 genera plot (combined mean CLR)
+```{r}
+# Step 1: summarize CLR distribution per genus × platform
+genus_summary <- genus_data %>%
+  pivot_longer(cols = c(CLR_Illumina, CLR_PacBio),
+               names_to = "Method",
+               values_to = "CLR") %>%
+  mutate(Method = ifelse(Method == "CLR_Illumina", "ITS2", "Full-length ITS")) %>%
+  group_by(Taxon, Method) %>%
+  summarize(
+    mean_CLR = mean(CLR, na.rm = TRUE),
+    se_CLR   = sd(CLR, na.rm = TRUE) / sqrt(n()),
+    .groups = "drop"
+  )
+
+# Step 2: choose top 20 genera by mean across both pipelines
+top20_taxa <- genus_summary %>%
+  group_by(Taxon) %>%
+  summarize(mean_across = mean(mean_CLR)) %>%
+  arrange(desc(mean_across)) %>%
+  slice_head(n = 20) %>%
+  pull(Taxon)
+
+top20_plotdata <- genus_summary %>% filter(Taxon %in% top20_taxa)
+
+# Step 3: plot with error bars
+Barplot_combinedtop20 <- ggplot(top20_plotdata,
+       aes(x = reorder(Taxon, -mean_CLR), y = mean_CLR, fill = Method)) +
+  geom_col(position = position_dodge(width = 0.7), width = 0.7, color = "black", linewidth = 0.5) +
+  geom_errorbar(aes(ymin = mean_CLR - se_CLR, ymax = mean_CLR + se_CLR),
+                position = position_dodge(width = 0.7),
+                width = 0.25, linewidth = 0.5) +
+  theme_classic(base_size = 14) +
+  labs(
+    title = "Top 20 Genera (Mean CLR Abundance ± SE)",
+    x = "Genus",
+    y = "Mean CLR (centered log-ratio)"
+  ) +
+  scale_fill_manual(values = c("ITS2" = "orange", "Full-length ITS" = "deeppink")) +
+  theme(axis.text.x = element_text(angle = 60, hjust = 1),
+        panel.border = element_rect(color = "black", fill = NA),
+        axis.line = element_line(color = "black"))
+
+Barplot_combinedtop20
+```
+
+#Fig S5: Top 20 genera plots (separate mean CLR)
+```{r}
+# Pick top 20 genera by ITS2's mean CLR
+top20_ITS2 <- genus_summary %>%
+  filter(Method == "ITS2") %>%
+  arrange(desc(mean_CLR)) %>%
+  slice_head(n = 20) %>%
+  pull(Taxon)
+
+plot_dat_ITS2 <- genus_summary %>%
+  filter(Taxon %in% top20_ITS2) %>%
+  mutate(Taxon = factor(Taxon, levels = top20_ITS2))
+
+top20_by_ITS2 <- ggplot(plot_dat_ITS2,
+       aes(x = Taxon, y = mean_CLR, fill = Method)) +
+  geom_col(position = position_dodge(width = 0.7),
+           width = 0.7, color = "black", linewidth = 0.3) +
+  geom_errorbar(aes(ymin = mean_CLR - se_CLR, ymax = mean_CLR + se_CLR),
+                position = position_dodge(width = 0.7),
+                width = 0.25, linewidth = 0.3) +
+  scale_fill_manual(values = c("ITS2" = "orange", "Full-length ITS" = "deeppink")) +
+  labs(title = "Top 20 Genera Ranked by ITS2 (Mean CLR ± SE)",
+       x = "Genus", y = "Mean CLR (centered log-ratio)", fill = "Method") +
+  theme_classic(base_size = 12) +
+  theme(axis.text.x = element_text(angle = 60, hjust = 1),
+        panel.border = element_rect(color = "black", fill = NA),
+        axis.line = element_line(color = "black"))
+
+top20_by_ITS2
+
+# Pick top 20 genera by Full-length ITS mean CLR
+top20_FullITS <- genus_summary %>%
+  filter(Method == "Full-length ITS") %>%
+  arrange(desc(mean_CLR)) %>%
+  slice_head(n = 20) %>%
+  pull(Taxon)
+
+plot_dat_FullITS <- genus_summary %>%
+  filter(Taxon %in% top20_FullITS) %>%
+  mutate(Taxon = factor(Taxon, levels = top20_FullITS))
+
+top20_by_FullITS <- ggplot(plot_dat_FullITS,
+       aes(x = Taxon, y = mean_CLR, fill = Method)) +
+  geom_col(position = position_dodge(width = 0.7),
+           width = 0.7, color = "black", linewidth = 0.3) +
+  geom_errorbar(aes(ymin = mean_CLR - se_CLR, ymax = mean_CLR + se_CLR),
+                position = position_dodge(width = 0.7),
+                width = 0.25, linewidth = 0.3) +
+  scale_fill_manual(values = c("ITS2" = "orange", "Full-length ITS" = "deeppink")) +
+  labs(title = "Top 20 Genera Ranked by Full-length ITS (Mean CLR ± SE)",
+       x = "Genus", y = "Mean CLR (centered log-ratio)", fill = "Method") +
+  theme_classic(base_size = 12) +
+  theme(axis.text.x = element_text(angle = 60, hjust = 1),
+        panel.border = element_rect(color = "black", fill = NA),
+        axis.line = element_line(color = "black"))
+
+top20_by_FullITS
+```
+
+
+#PacBio vs Illumina comparison
+#Fig 2a: Alpha-diversity group by sample type
+```{r}
+# 1. Compute alpha diversity for each pipeline
+ITS2_alpha <- estimate_richness(ps_Illumina_ITS2_filt,
+                                measures = c("Shannon", "Chao1", "Observed")) %>%
+  mutate(Label = rownames(.),
+         Pipeline = "ITS2")
+
+
+ITS_alpha <- estimate_richness(ps_PacBio_ITS_filt,
+                                   measures = c("Shannon", "Chao1", "Observed")) %>%
+  mutate(Label = rownames(.),
+         Pipeline = "Full-length ITS")
+
+# 2. Inner join on Label to ensure true pairs
+alpha_pairs <- inner_join(
+  ITS2_alpha %>% select(Label, Shannon_ITS2 = Shannon,
+                        Chao1_ITS2 = Chao1, Obs_ITS2 = Observed),
+  ITS_alpha %>% select(Label, Shannon_ITS = Shannon,
+                           Chao1_ITS = Chao1, Obs_ITS = Observed),
+  by = "Label"
+)
+
+metadata <- data.frame(ps_Illumina_ITS2_filt@sam_data)
+alpha_pairs <- left_join(alpha_pairs, metadata, by = "Label")
+
+# Reshape the dataframe
+alpha_long <- alpha_pairs %>%
+  transmute(
+    Label, SampleType, Location,
+    Shannon_ITS2 = Shannon_ITS2, Shannon_ITS = Shannon_ITS,
+    Chao1_ITS2   = Chao1_ITS2,   Chao1_ITS   = Chao1_ITS,
+    Observed_ITS2 = Obs_ITS2,    Observed_ITS = Obs_ITS
+  ) %>%
+  pivot_longer(
+    cols = -c(Label, SampleType, Location),
+    names_to  = c("Metric","Pipeline"),
+    names_sep = "_",
+    values_to = "Value"
+  ) %>%
+  mutate(Pipeline = ifelse(Pipeline == "ITS2", "ITS2", "Full-length ITS"))
+
+# 3. Paired Wilcoxon tests
+paired_alpha_tests <- alpha_long %>%
+  pivot_wider(id_cols = c(Label, SampleType, Metric),
+              names_from = Pipeline,
+              values_from = Value) %>%
+  filter(!is.na(`Full-length ITS`), !is.na(ITS2)) %>%
+  group_by(SampleType, Metric) %>%
+  summarise(
+    n           = n(),
+    median_diff = median(`Full-length ITS` - ITS2, na.rm = TRUE),
+    p_value     = wilcox.test(`Full-length ITS`, ITS2, paired = TRUE,
+                              exact = FALSE)$p.value,
+    W           = wilcox.test(`Full-length ITS`, ITS2, paired = TRUE,
+                              exact = FALSE)$statistic,
+    .groups = "drop"
+  ) %>%
+  group_by(Metric) %>%                # FDR across SampleTypes within each metric
+  mutate(q_value = p.adjust(p_value, method = "BH")) %>%
+  ungroup() %>%
+  mutate(sig = case_when(
+    is.na(q_value)      ~ "",
+    q_value < 0.001     ~ "***",
+    q_value < 0.01      ~ "**",
+    q_value < 0.05      ~ "*",
+    TRUE                ~ "ns"
+  ))
+
+#4. Plot: paired box with lines
+desired_location_order <- c("Control","Dorm", "Home1", "Home2", "Lab1", "Lab2")
+alpha_long$Location <- factor(alpha_long$Location, levels = desired_location_order)
+
+plot_alpha_paired_facet_by_loc <- function(metric_name, ylab) {
+
+  df_plot <- alpha_long %>% 
+    filter(Metric == metric_name) %>%
+    # ensure Location exists (pulled from your metadata join)
+    mutate(Location = factor(Location))      
+
+  # y-position per facet (just above max in that facet)
+  y_max <- df_plot %>%
+    group_by(SampleType) %>%
+    summarise(y = max(Value, na.rm = TRUE), .groups = "drop")
+
+  ann <- paired_alpha_tests %>%
+    filter(Metric == metric_name) %>%
+    select(SampleType, sig, q_value) %>%
+    left_join(y_max, by = "SampleType") %>%
+    mutate(y = y + 0.05 * abs(y),   # headroom for the annotation
+           x = 1.5)
+
+  ggplot(df_plot, aes(x = Pipeline, y = Value, group = Label)) +
+     # side-by-side boxplots per Pipeline (keep neutral fill)
+    geom_boxplot(aes(group = Pipeline),
+                 width = 0.6, fill = "grey88", color = "black",
+                 outlier.shape = NA) +
+    # neutral connecting lines emphasize pairing (not method or location)
+    geom_line(alpha = 0.35, color = "grey55") +
+    # points colored by Location (Dark2)
+    geom_point(aes(color = Location), size = 2, alpha = 0.9,
+               position = position_jitter(width = 0.04, height = 0)) +
+    # significance label per facet (paired Wilcoxon within SampleType)
+    geom_text(data = ann, aes(x = x, y = y, label = sig),
+              inherit.aes = FALSE, size = 5) +
+    scale_color_brewer(palette = "Set2", drop = FALSE) +  # <-- Dark2
+    facet_wrap(~ SampleType, scales = "fixed") +
+    labs(x = "", y = ylab,
+         color = "Location",
+         caption = "Paired Wilcoxon within SampleType; labels: ***<0.001, **<0.01, *<0.05, ns≥0.05") +
+    theme_classic(base_size = 14) +
+    theme(
+      panel.border = element_rect(color = "black", fill = NA),
+      axis.text.x  = element_text(angle = 45, hjust = 1)
+    )
+}
+
+# Build your three panels
+p_shannon  <- plot_alpha_paired_facet_by_loc("Shannon",  "Shannon diversity")
+p_chao1    <- plot_alpha_paired_facet_by_loc("Chao1",    "Chao1 richness")
+p_observed <- plot_alpha_paired_facet_by_loc("Observed", "Observed ASVs")
+
+p_shannon; p_chao1; p_observed
+
+```
+## Alpha-diversity by Location
+```{r}
+# 3. Paired Wilcoxon tests
+paired_alpha_tests <- alpha_long %>%
+  pivot_wider(id_cols = c(Label, Location, Metric),
+              names_from = Pipeline,
+              values_from = Value) %>%
+  filter(!is.na(`Full-length ITS`), !is.na(ITS2)) %>%
+  group_by(Location, Metric) %>%
+  summarise(
+    n           = n(),
+    median_diff = median(`Full-length ITS` - ITS2, na.rm = TRUE),
+    p_value     = wilcox.test(`Full-length ITS`, ITS2, paired = TRUE,
+                              exact = FALSE)$p.value,
+    W           = wilcox.test(`Full-length ITS`, ITS2, paired = TRUE,
+                              exact = FALSE)$statistic,
+    .groups = "drop"
+  ) %>%
+  group_by(Metric) %>%                # FDR across SampleTypes within each metric
+  mutate(q_value = p.adjust(p_value, method = "BH")) %>%
+  ungroup() %>%
+  mutate(sig = case_when(
+    is.na(q_value)      ~ "",
+    q_value < 0.001     ~ "***",
+    q_value < 0.01      ~ "**",
+    q_value < 0.05      ~ "*",
+    TRUE                ~ "ns"
+  ))
+
+paired_alpha_tests
+
+#4. Plot: paired box with lines
+desired_location_order <- c("Control","Dorm", "Home1", "Home2", "Lab1", "Lab2")
+alpha_long$Location <- factor(alpha_long$Location, levels = desired_location_order)
+
+plot_alpha_paired_facet_by_loc <- function(metric_name, ylab) {
+
+  df_plot <- alpha_long %>% 
+    filter(Metric == metric_name) %>%
+    # ensure Location exists (pulled from your metadata join)
+    mutate(SampleType = factor(SampleType))      
+
+  # y-position per facet (just above max in that facet)
+  y_max <- df_plot %>%
+    group_by(Location) %>%
+    summarise(y = max(Value, na.rm = TRUE), .groups = "drop")
+
+  ann <- paired_alpha_tests %>%
+    filter(Metric == metric_name) %>%
+    select(Location, sig, q_value) %>%
+    left_join(y_max, by = "Location") %>%
+    mutate(y = y + 0.05 * abs(y),   # headroom for the annotation
+           x = 1.5)
+
+  ggplot(df_plot, aes(x = Pipeline, y = Value, group = Label)) +
+     # side-by-side boxplots per Pipeline (keep neutral fill)
+    geom_boxplot(aes(group = Pipeline),
+                 width = 0.6, fill = "grey88", color = "black",
+                 outlier.shape = NA) +
+    # neutral connecting lines emphasize pairing (not method or location)
+    geom_line(alpha = 0.35, color = "grey55") +
+    # points colored by Location (Dark2)
+    geom_point(aes(color = Location), size = 2, alpha = 0.9,
+               position = position_jitter(width = 0.04, height = 0)) +
+    # significance label per facet (paired Wilcoxon within SampleType)
+    geom_text(data = ann, aes(x = x, y = y, label = sig),
+              inherit.aes = FALSE, size = 5) +
+    scale_color_brewer(palette = "Set2", drop = FALSE) +  # <-- Dark2
+    facet_wrap(~ Location, scales = "fixed") +
+    labs(x = "", y = ylab,
+         color = "Location",
+         caption = "Paired Wilcoxon within SampleType; labels: ***<0.001, **<0.01, *<0.05, ns≥0.05") +
+    theme_classic(base_size = 14) +
+    theme(
+      panel.border = element_rect(color = "black", fill = NA),
+      axis.text.x  = element_text(angle = 45, hjust = 1)
+    )
+}
+
+# Build your three panels
+p_shannon  <- plot_alpha_paired_facet_by_loc("Shannon",  "Shannon diversity")
+p_chao1    <- plot_alpha_paired_facet_by_loc("Chao1",    "Chao1 richness")
+p_observed <- plot_alpha_paired_facet_by_loc("Observed", "Observed ASVs")
+
+p_shannon; p_chao1; p_observed
+```
+
+##Fig S6: Correlation: Shannon
+```{r}
+# Pearson correlation
+cor_shannon <- cor(alpha_pairs$Shannon_ITS2,
+                   alpha_pairs$Shannon_ITS,
+                   method = "spearman",
+                   use = "complete.obs")
+
+# R-squared
+r2_shannon <- cor_shannon^2
+
+ggplot(alpha_pairs,
+       aes(x = Shannon_ITS2, y = Shannon_ITS)) +
+  geom_point(size = 2, alpha = 0.7) +
+  geom_abline(slope = 1, intercept = 0,
+              linetype = "dashed", color = "grey40") +
+  annotate("text",
+           x = min(alpha_pairs$Shannon_ITS2, na.rm = TRUE),
+           y = max(alpha_pairs$Shannon_ITS, na.rm = TRUE),
+           hjust = 0, vjust = 1,
+           label = paste0("R² = ", round(r2_shannon, 2),
+                          "\nr = ", round(cor_shannon, 2))) +
+  labs(x = "Shannon diversity (ITS2)",
+       y = "Shannon diversity (Full-length ITS)",
+       title = "Paired Shannon diversity comparison") +
+  theme_classic(base_size = 14)
+```
+##Fig S6: Correlation: Chao1
+```{r}
+# Pearson correlation
+cor_chao1 <- cor(alpha_pairs$Chao1_ITS2,
+                 alpha_pairs$Chao1_ITS,
+                 method = "spearman",
+                 use = "complete.obs")
+
+# R-squared
+r2_chao1 <- cor_chao1^2
+
+ggplot(alpha_pairs,
+       aes(x = Chao1_ITS2, y = Chao1_ITS)) +
+  geom_point(size = 2, alpha = 0.7) +
+  geom_abline(slope = 1, intercept = 0,
+              linetype = "dashed", color = "grey40") +
+  annotate("text",
+           x = min(alpha_pairs$Chao1_ITS2, na.rm = TRUE),
+           y = max(alpha_pairs$Chao1_ITS, na.rm = TRUE),
+           hjust = 0, vjust = 1,
+           label = paste0("R² = ", round(r2_chao1, 2),
+                          "\nr = ", round(cor_chao1, 2))) +
+  labs(x = "Chao1 richness (ITS2)",
+       y = "Chao1 richness (Full-length ITS)",
+       title = "Paired richness comparison") +
+  theme_classic(base_size = 14)
+```
+
+
+#Use PacBio ITS as reference database to annotate Illumina BLAST Hits with PacBio Taxonomy
+##Optional: Create PacBio ITS reference database
+```{r}
+library(Biostrings)
+
+# Extract refseq
+refseqs <- refseq(ps_PacBio_ITS_filt)
+
+# Write to FASTA
+writeXStringSet(refseqs, filepath = "PacBio/pacbio_filt_refseq.fasta")
+
+# Extract taxonomy table
+tax <- tax_table(ps_PacBio_ITS_filt)
+
+# Convert to data frame and add sequence IDs
+tax_df_ITS <- as.data.frame(tax)
+tax_df_ITS$SequenceID <- names(refseqs)
+
+# Reorder columns: ID first
+tax_df_ITS <- tax_df_ITS[, c("SequenceID", setdiff(colnames(tax_df_ITS), "SequenceID"))]
+
+# Write to TSV
+write.table(tax_df_ITS, file = "PacBio/pacbio_filt_taxonomy.tsv", sep = "\t", row.names = FALSE, quote = FALSE)
+```
+
+##Get Illumina ITS2 sequence
+```{r}
+library(Biostrings)
+
+# Extract refseq
+refseqs <- refseq(ps_Illumina_ITS2_filt)
+
+# Write to FASTA
+writeXStringSet(refseqs, filepath = "Illumina/Illumina_filt_refseq.fasta")
+
+# Extract taxonomy table
+tax <- tax_table(ps_Illumina_ITS2_filt)
+
+# Convert to data frame and add sequence IDs
+tax_df_ITS2 <- as.data.frame(tax)
+tax_df_ITS2$SequenceID <- names(refseqs)
+
+# Reorder columns: ID first
+tax_df_ITS2 <- tax_df_ITS2[, c("SequenceID", setdiff(colnames(tax_df_ITS2), "SequenceID"))]
+
+# Write to TSV
+write.table(tax_df_ITS2, file = "Illumina/Illumina_filt_taxonomy.tsv", sep = "\t", row.names = FALSE, quote = FALSE)
+```
+
+#Fig 4b: Blast result: mapped ASVs
+```{r}
+# Load libraries
+library(dplyr)
+library(readr)
+
+# Step 1: Load BLAST hits
+blast_hits <- read_tsv("Illumina/Illumina_blast_hits_allpacbio.tsv", col_names = c(
+  "qseqid", "sseqid", "pident", "length", "mismatch", "gapopen",
+  "qstart", "qend", "sstart", "send", "evalue", "bitscore"
+))
+
+seq_asv_map <- tibble(
+  SequenceID = names(refseq(ps_Illumina_ITS2_filt)),
+  Sequence = as.character(refseq(ps_Illumina_ITS2_filt))
+)
+
+blast_hits_filt <- blast_hits %>%
+  filter(
+    qseqid %in% seq_asv_map$Sequence,
+    sseqid %in% tax_df_ITS$SequenceID
+  )
+
+blast_hits_filt$qseqid_sequence <-blast_hits_filt$qseqid
+blast_hits_filt$qseqid <- seq_asv_map$SequenceID[
+  match(blast_hits_filt$qseqid_sequence, seq_asv_map$Sequence)
+]
+
+#Mapped hits
+matched_hits <- blast_hits_filt %>%
+  filter(pident >= 99, bitscore > 0)
+
+matched_summary <- matched_hits %>%
+  count(qseqid, sseqid)
+
+multi_hits <- matched_summary %>%
+  group_by(qseqid) %>%
+  summarise(n_matches = n()) %>%
+  filter(n_matches > 1)
+
+nrow(multi_hits)  # Number of Illumina ASVs mapping to >1 PacBio ASV
+
+total_hits <- matched_summary %>%
+  group_by(qseqid) %>%
+  summarise(n_matches = n()) %>%
+  filter(n_matches >= 1)
+
+nrow(total_hits)  # Number of Illumina ASVs mapping to >=1 PacBio ASV
+
+total_hits <- matched_summary %>%
+  group_by(sseqid) %>%
+  summarise(n_matches = n()) %>%
+  filter(n_matches >= 1)
+
+nrow(total_hits) # Number of PacBio ASVs mapped by at least 1 ITS2 ASV
+
+total_hits <- matched_summary %>%
+  group_by(sseqid) %>%
+  summarise(n_matches = n()) %>%
+  filter(n_matches > 1)
+
+nrow(total_hits) # Number of PacBio ASVs mapped by at least 1 ITS2 ASV
+
+# Generate bar plot of mapping distribution: ITS2
+top_hits <- matched_hits %>%
+  filter(pident == 100, bitscore > 0)
+
+mapping_counts <- top_hits %>%
+  group_by(qseqid) %>%
+  summarize(
+    n_mappings = n_distinct(sseqid),
+    .groups = "drop"
+  )
+
+mapping_distribution <- mapping_counts %>%
+  count(n_mappings)
+
+MappingDistribution_ITS2 <- ggplot(mapping_distribution, aes(x = factor(n_mappings), y = n)) +
+  geom_bar(stat = "identity", fill = "orange", color = "black", linewidth = 0.2) +
+  labs(
+    title = "Distribution of ITS2 to Full-length ITS Mapping",
+    x = "Number of Full-length ITS Matches per ITS2 ASV",
+    y = "Number of ITS2 ASVs"
+  ) +
+  theme_bw(base_size = 14) +
+  theme(
+    panel.grid = element_blank()
+  )
+
+MappingDistribution_ITS2
+
+# Generate bar plot of mapping distribution: full-length ITS
+mapping_counts <- top_hits %>%
+  group_by(sseqid) %>%
+  summarize(
+    n_mappings = n_distinct(qseqid),
+    .groups = "drop"
+  )
+
+mapping_distribution <- mapping_counts %>%
+  count(n_mappings)
+
+MappingDistribution_ITS <- ggplot(mapping_distribution, aes(x = factor(n_mappings), y = n)) +
+  geom_bar(stat = "identity", fill = "deeppink", color = "black", linewidth = 0.2) +
+  labs(
+    title = "Distribution of Full-length ITS Mapping",
+    x = "Number of ITS2 ASVs Matches per full-length ITS sequence",
+    y = "Number of Full-length ITS ASVs"
+  ) +
+  theme_bw(base_size = 14) +
+  theme(
+    panel.grid = element_blank()
+  )
+
+MappingDistribution_ITS
+```
+
+
+##Collapse 100% matched ITS ASVs
+```{r}
+#Extract all 100% hits
+hits_100 <- matched_hits %>%
+  filter(pident >= 99.999)
+
+tax_ranks <- c("Kingdom", "Phylum", "Class", "Order", "Family", "Genus", "Species")
+
+#Add taxonomy from tax_df_ITS
+hits_100_tax <- hits_100 %>%
+  left_join(
+    tax_df_ITS %>% select(SequenceID, all_of(tax_ranks)),
+    by = c("sseqid" = "SequenceID")
+  )
+
+#Function to collapse
+collapse_lca <- function(df, ranks) {
+  out <- setNames(as.list(rep(NA_character_, length(ranks))), ranks)
+
+  for (r in ranks) {
+    vals <- unique(na.omit(df[[r]]))
+
+    if (length(vals) == 1) {
+      out[[r]] <- vals
+    } else {
+      break
+    }
+  }
+
+  as_tibble(out)
+}
+
+#collapse taxonomy for each ITS2 ASV
+collapsed_taxonomy <- hits_100_tax %>%
+  group_by(qseqid) %>%
+  group_modify(~ collapse_lca(.x, tax_ranks)) %>%
+  ungroup()
+
+#add useful metadata
+hit_counts <- hits_100_tax %>%
+  group_by(qseqid) %>%
+  summarize(
+    n_100_hits = n_distinct(sseqid),
+    .groups = "drop"
+  )
+
+collapsed_taxonomy <- collapsed_taxonomy %>%
+  left_join(hit_counts, by = "qseqid") %>%
+  mutate(
+    Match_Type = ifelse(n_100_hits == 1, "Unique 100% match", "Multiple 100% matches")
+  )
+
+# keep the original matched IDs
+matched_ids <- hits_100_tax %>%
+  group_by(qseqid) %>%
+  summarize(
+    matched_sseqids = paste(sort(unique(sseqid)), collapse = ";"),
+    .groups = "drop"
+  )
+
+collapsed_taxonomy <- collapsed_taxonomy %>%
+  left_join(matched_ids, by = "qseqid")
+
+```
+
+##Subset to mapped and unmapped phyloseq
+```{r}
+ps_Illumina_ITS2_mapped <- subset_taxa(ps_Illumina_ITS2_filt, taxa_names(ps_Illumina_ITS2_filt) %in% hits_100$qseqid)
+ps_Illumina_ITS2_unmapped <- subset_taxa(ps_Illumina_ITS2_filt, !(taxa_names(ps_Illumina_ITS2_filt) %in% hits_100$qseqid))
+
+ps_PacBio_Fungi_match_mapped <- subset_taxa(ps_PacBio_ITS_filt, taxa_names(ps_PacBio_ITS_filt) %in% hits_100$sseqid)
+ps_PacBio_Fungi_match_unmapped <- subset_taxa(ps_PacBio_ITS_filt, !(taxa_names(ps_PacBio_ITS_filt) %in% hits_100$sseqid))
+
+ps_Illumina_ITS2_mapped
+ps_PacBio_Fungi_match_mapped
+
+library(Biostrings)
+Illumina_ITS2_mapped_seq <- refseq(ps_Illumina_ITS2_mapped)
+writeXStringSet(Illumina_ITS2_mapped_seq, filepath = "Illumina/matched_ITS2_filt_refseqs.fasta", format = "fasta")
+PacBio_ITS_mapped_seq <- refseq(ps_PacBio_Fungi_match_mapped)
+writeXStringSet(PacBio_ITS_mapped_seq, filepath = "PacBio/matched_ITS_filt_refseqs.fasta", format = "fasta")
+
+Illumina_ITS2_mapped_tax <- data.frame(ps_Illumina_ITS2_mapped@tax_table)
+PacBio_ITS_mapped_tax <- data.frame(ps_PacBio_Fungi_match_mapped@tax_table)
+```
+
+##Fig 5a: Tree plot of mapped ASVs
+```{r}
+library(ggtree)
+library(treeio)
+library(gridExtra)
+library(patchwork)  # for side-by-side plots
+
+# Load trees
+tree_illumina <- read.tree("Illumina/Illumina_ITS2_tree.nwk")
+tree_pacbio <- read.tree("PacBio/PacBio_ITS_tree.nwk")
+
+# Convert rownames to a column for joining
+illumina_tax <- Illumina_ITS2_mapped_tax %>%
+ rownames_to_column(var = "label")  # 'label' must match tip labels in the tree
+
+pacbio_tax <- PacBio_ITS_mapped_tax %>%
+  rownames_to_column(var = "label")
+
+#Check label matching
+setdiff(tree_illumina$tip.label, illumina_tax$label)
+all(tree_illumina$tip.label %in% illumina_tax$label)
+
+setdiff(tree_pacbio$tip.label, pacbio_tax$label)
+all(tree_pacbio$tip.label %in% pacbio_tax$label)
+
+#Phylum color settings
+all_phyla <- union(unique(illumina_tax$phylum), unique(pacbio_tax$Phylum))
+phylum_colors <- setNames(
+  brewer.pal(n = max(3, length(all_phyla)), name = "Dark2")[1:length(all_phyla)],
+  all_phyla
+)
+
+all_class <- union(unique(illumina_tax$class), unique(pacbio_tax$Class))
+library(colorspace)
+class_colors <- setNames(
+  qualitative_hcl(length(all_class), palette = "Dark 3"),  # or "Set 3", "Harmonic"
+  all_class
+)
+
+#Taxa to label: using health-related genera list
+## Extract ASVs from key genera
+illumina_labels_to_label <- illumina_tax[illumina_tax$genus %in% target_genera, ]$label
+pacbio_labels_to_label <- pacbio_tax[pacbio_tax$Genus %in% target_genera, ]$label
+
+# Plot with same scale
+p1 <- ggtree(tree_illumina, aes(color = phylum)) %<+% illumina_tax +
+  geom_tree(size = 0.2) +
+  geom_tiplab(data = function(x) subset(x, label %in% illumina_labels_to_label), aes(label = genus), size = 4, geom = "text", align = TRUE, linesize = 0.1, show.legend = FALSE) +
+  scale_color_manual(values = phylum_colors, na.value = "gray40", name = "Phylum") +
+  theme_tree2() +
+  ggtitle("ITS2 Tree (Short-read)") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+p2 <- ggtree(tree_pacbio, aes(color = Phylum)) %<+% pacbio_tax+
+  geom_tree(size = 0.2) +
+  geom_tiplab(data = function(x) subset(x, label %in% pacbio_labels_to_label),
+              aes(label = Genus), size = 4, geom = "text", align = TRUE, linesize = 0.1, show.legend = FALSE) +
+  scale_color_manual(values = phylum_colors, na.value = "gray40", name = "Phylum") +
+  theme_tree2() +
+  ggtitle("Full-length ITS Tree (Long-read)") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+# Combine
+# Get max distance (branch length) from both trees
+max_dist <- 4
+
+# Apply the same x-axis limits to both plots
+p1 <- p1 + xlim(0, max_dist)
+p2 <- p2 + xlim(0, max_dist)
+
+# Combine side by side
+grid.arrange(p1, p2, ncol = 2)
+```
+
+###Fig S9: Tree polytomies
+```{r}
+library(ape)
+
+# Function to count polytomies
+count_polytomies <- function(tree) {
+  # Count how often each node appears as a parent
+  parent_counts <- table(tree$edge[,1])
+  
+  # Internal nodes only
+  internal_nodes <- (Ntip(tree) + 1):(Ntip(tree) + Nnode(tree))
+  
+  # Count internal nodes with >2 descendants (polytomies)
+  sum(parent_counts[as.character(internal_nodes)] > 2, na.rm = TRUE)
+}
+
+poly_ITS2  <- count_polytomies(tree_illumina)
+poly_full  <- count_polytomies(tree_pacbio)
+
+poly_ITS2
+poly_full
+
+#compute proportions
+poly_ITS2 / Nnode(tree_illumina)
+poly_full / Nnode(tree_pacbio)
+
+#Quantify branch length 
+summary(tree_illumina$edge.length)
+summary(tree_pacbio$edge.length)
+
+#Distribution statistics
+wilcox.test(tree_illumina$edge.length,
+            tree_pacbio$edge.length)
+
+#Total tree length
+sum(tree_illumina$edge.length)
+sum(tree_pacbio$edge.length)
+
+#Visualization: branch length density plot
+df_branches <- data.frame(
+  length = c(tree_illumina$edge.length,
+             tree_pacbio$edge.length),
+  Dataset = c(rep("ITS2", length(tree_illumina$edge.length)),
+              rep("Full-length ITS", length(tree_pacbio$edge.length)))
+)
+
+ggplot(df_branches, aes(x = length, fill = Dataset)) +
+  geom_density(alpha = 0.4) +
+  scale_fill_manual(values = c(
+    "ITS2" = "orange",
+    "Full-length ITS" = "deeppink"
+  )) +
+  scale_x_log10() +
+  theme_classic() +
+  labs(x = "Branch length (log scale)",
+       y = "Density")
+```
+
+
+#Compare Blast results: taxonomy
+```{r}
+# Step 2: Load taxonomy table
+tax_ITS <- data.frame(ps_PacBio_ITS_filt@tax_table) 
+tax_ITS2 <- data.frame(ps_Illumina_ITS2_filt@tax_table) 
+tax_pacbio_ITS2 <- data.frame(ps_PacBio_ITS2_filt@tax_table) 
+
+tax_ITS$Family[grepl("_fam_Incertae_sedis$", tax_ITS$Family)] <- NA
+
+# Ensure the taxonomy table has columns: FeatureID, Taxon
+# Step 3: Join top hits with taxonomy
+
+tax_df <- tax_ITS2 %>%
+  tibble::rownames_to_column(var = "qseqid")
+
+# Step 5: Merge annotated hits with all ASVs
+taxonomy_full <- left_join(tax_df, collapsed_taxonomy, by = "qseqid")
+taxonomy_mapped <- subset(taxonomy_full,!is.na(Match_Type))
+taxonomy_mapped$Family[grepl("_fam_Incertae_sedis$", taxonomy_mapped$Family)] <- NA
+
+# Step 6: Save output
+write.csv(taxonomy_full, "Illumina/illumina_taxonomy_filt.csv")
+```
+
+##Fig 5b: Agreement: original taxonomy vs PacBio blasted
+```{r}
+#Agreement
+taxonomy_mapped$Species_Agreement <- ifelse(
+  taxonomy_mapped$species == taxonomy_mapped$Species,
+  "Match",
+  "Mismatch"
+)
+taxonomy_mapped$Genus_Agreement <- ifelse(
+  taxonomy_mapped$genus == taxonomy_mapped$Genus,
+  "Match",
+  "Mismatch"
+)
+taxonomy_mapped$Family_Agreement <- ifelse(
+  taxonomy_mapped$family == taxonomy_mapped$Family,
+  "Match",
+  "Mismatch"
+)
+taxonomy_mapped$Order_Agreement <- ifelse(
+  taxonomy_mapped$order == taxonomy_mapped$Order,
+  "Match",
+  "Mismatch"
+)
+
+taxonomy_mapped$Class_Agreement <- ifelse(
+  taxonomy_mapped$class == taxonomy_mapped$Class,
+  "Match",
+  "Mismatch"
+)
+
+taxonomy_mapped$Phylum_Agreement <- ifelse(
+  taxonomy_mapped$phylum == taxonomy_mapped$Phylum,
+  "Match",
+  "Mismatch"
+)
+
+#Save
+write.csv(taxonomy_mapped, "Illumina/illumina_taxonomy_mapped_sameassignmentdatabase_filt.csv")
+
+# Reshape to long format
+agreement_long <- taxonomy_mapped %>%
+  select(qseqid, Phylum_Agreement, Class_Agreement, Order_Agreement,
+         Family_Agreement, Genus_Agreement, Species_Agreement) %>%
+  pivot_longer(
+    cols = -qseqid,
+    names_to = "Rank",
+    values_to = "Agreement"
+  )
+
+agreement_long <- agreement_long %>%
+  mutate(
+    Rank = case_when(
+      Rank == "Phylum_Agreement"  ~ "Phylum",
+      Rank == "Class_Agreement"   ~ "Class",
+      Rank == "Order_Agreement"   ~ "Order",
+      Rank == "Family_Agreement"  ~ "Family",
+      Rank == "Genus_Agreement"   ~ "Genus",
+      Rank == "Species_Agreement" ~ "Species",
+      TRUE ~ Rank
+    )
+  )
+
+# Arrange the orders of taxonomy rank
+taxonomy_order <- c("Phylum", "Class", "Order", "Family", "Genus","Species")
+
+agreement_long$Rank <- factor(agreement_long$Rank, levels = taxonomy_order)
+
+custom_colors <- c(
+  "Match" = "darkgreen",
+  "Mismatch" = "red",
+  "NA" = "gray"
+)
+
+# Plot
+Percentage_agreement <- ggplot(agreement_long, aes(x = Rank, fill = Agreement)) +
+  geom_bar(position = "fill") +
+  scale_fill_manual(values = custom_colors) +
+  scale_y_continuous(labels = scales::percent) +
+  labs(
+    title = "Taxonomy Assignment Agreement (ITS2 vs Full-length ITS)",
+    x = "Taxonomic Rank",
+    y = "Percent of ASVs"
+  ) +
+  theme_bw(base_size = 14) +
+  theme(
+    panel.grid.major = element_blank(),  # Remove major grid lines
+    panel.grid.minor = element_blank(),  # Remove minor grid lines
+    axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1)  # Rotate x-axis labels
+  )
+Percentage_agreement
+
+breakdown <- agreement_long %>%
+  group_by(Rank, Agreement) %>%
+  summarise(n = n()) %>%
+  group_by(Rank) %>%
+  mutate(percent = 100 * n / sum(n))
+
+print(breakdown)
+```
+##Fig 5c: Improvement in resolution
+```{r}
+#Step 1: Compute the deepest rank assigned by each method
+# Helper function to count non-empty ranks
+get_depth <- function(row, ranks) {
+  sum(!is.na(row[ranks]) & row[ranks] != "")
+}
+
+illumina_ranks <- c("kingdom","phylum", "class", "order", "family", "genus", "species")
+pacbio_ranks   <- c("Kingdom","Phylum", "Class", "Order", "Family", "Genus", "Species")
+
+taxonomy_mapped$Illumina_Depth <- apply(taxonomy_mapped, 1, get_depth, ranks = illumina_ranks)
+taxonomy_mapped$PacBio_Depth   <- apply(taxonomy_mapped, 1, get_depth, ranks = pacbio_ranks)
+
+#Step 2: Check for full agreement at shared depth
+taxonomy_mapped$Agreement_UpTo_Illumina <- mapply(function(row_idx, depth) {
+  if (is.na(depth) || depth == 0) return(FALSE)
+
+  illumina_vals <- unlist(taxonomy_mapped[row_idx, illumina_ranks[1:depth]])
+  pacbio_vals   <- unlist(taxonomy_mapped[row_idx, pacbio_ranks[1:depth]])
+
+  comparable <- !is.na(illumina_vals) & !is.na(pacbio_vals)
+
+  # If nothing is comparable at all, return NA
+  if (!any(comparable)) return(NA)
+
+  all(illumina_vals[comparable] == pacbio_vals[comparable])
+},
+row_idx = seq_len(nrow(taxonomy_mapped)),
+depth = taxonomy_mapped$Illumina_Depth
+)
+
+#Step 3: Identify ASVs with improved resolution
+taxonomy_mapped$Agreement_Label <- mapply(function(row_idx, depth) {
+  if (is.na(depth) || depth == 0) return("No Illumina assignment")
+
+  illumina_vals <- unlist(taxonomy_mapped[row_idx, illumina_ranks[1:depth]])
+  pacbio_vals   <- unlist(taxonomy_mapped[row_idx, pacbio_ranks[1:depth]])
+
+  comparable <- !is.na(illumina_vals) & !is.na(pacbio_vals)
+
+  if (!any(comparable)) return("No comparable ranks")
+  if (all(illumina_vals[comparable] == pacbio_vals[comparable])) return("Agree")
+  return("Disagree")
+},
+row_idx = seq_len(nrow(taxonomy_mapped)),
+depth = taxonomy_mapped$Illumina_Depth
+)
+
+taxonomy_mapped$Resolution_Status <- with(taxonomy_mapped, ifelse(
+  is.na(PacBio_Depth) | is.na(Illumina_Depth) |
+    Agreement_Label %in% c("No Illumina assignment", "No comparable ranks"),
+  "Uncomparable",
+  ifelse(
+    Agreement_Label == "Disagree", "Disagree",
+    ifelse(
+      PacBio_Depth > Illumina_Depth, "Enhanced",
+      ifelse(
+        PacBio_Depth == Illumina_Depth, "Same",
+        "Decreased"
+      )
+    )
+  )
+))
+
+taxonomy_mapped$Resolution_Status <- factor(
+  taxonomy_mapped$Resolution_Status,
+  levels = c("Same", "Enhanced", "Decreased", "Disagree", "Uncomparable")
+)
+
+#Save
+write.csv(taxonomy_mapped, "Illumina/illumina_taxonomy_mapped_agreement_filt.csv")
+
+#Step 4: Summarize
+Resolution_Change <- ggplot(filter(taxonomy_mapped, !is.na(Resolution_Status) & Resolution_Status != "Uncomparable"), aes(x = Resolution_Status)) +
+  geom_bar(fill = "darkgreen", color = "black", linewidth = 0.2) +
+  labs(
+    title = "Resolution Change of ITS2 ASVs",
+    x = "Category",
+    y = "Number of ASVs"
+  )+
+   geom_text(
+    stat = "count",
+    aes(label = ..count..),
+    vjust = 1.5,
+    size = 4, color = "white"
+  ) +
+  theme_bw(base_size = 14) +
+   theme(
+    panel.grid.major = element_blank(),  # Remove major grid lines
+    panel.grid.minor = element_blank(),  # Remove minor grid lines
+    axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1)  # Rotate x-axis labels
+  )
+
+Resolution_Change
+```
+
+##Fig 5e: Missmatched ones
+```{r}
+# Extract mismatched rows (excluding NAs)
+mismatched <- taxonomy_mapped %>%
+  filter(Resolution_Status == "Disagree") 
+
+mismatched$assignment.1 <- ifelse(!is.na(mismatched$Species), mismatched$Species,
+                            ifelse(!is.na(mismatched$Genus), mismatched$Genus,
+                                   ifelse(!is.na(mismatched$Family), mismatched$Family,
+                                        ifelse(!is.na(mismatched$Order), mismatched$Order,
+                                          ifelse(!is.na(mismatched$Class), mismatched$Class, NA)))))
+
+table(mismatched$phylum)   # Illumina
+table(mismatched$Phylum)   # PacBio
+
+#Sankey or alluvial plot
+library(ggalluvial)
+missmatched <- ggplot(mismatched, aes(axis1 = assignment, axis2 = assignment.1)) +
+  geom_alluvium(aes(fill = Phylum), width = 1/12) +
+  geom_stratum() + geom_text(stat = "stratum", aes(label = after_stat(stratum))) +
+  scale_x_discrete(limits = c("ITS2", "Full-length ITS")) +
+  #scale_color_manual(values = phylum_colors, na.value = "gray40", name = "Phylum") +
+  scale_fill_brewer(palette = "Dark2", na.value = "gray80") +
+  theme_minimal() +
+  theme(
+    panel.grid.major = element_blank(),  # Remove major grid lines
+    panel.grid.minor = element_blank(),  # Remove minor grid lines
+  )+
+  labs(title = "Genus-Level Taxonomic Shifts in Mismatched ASVs")
+
+missmatched
+
+#Create pairwise comparison of each rank
+taxonomy_mapped$Mismatch_Rank <- apply(taxonomy_mapped, 1, function(row) {
+  for (i in seq_along(illumina_ranks)) {
+    illu_val <- row[[illumina_ranks[i]]]
+    pacb_val <- row[[pacbio_ranks[i]]]
+    
+    if (!is.na(illu_val) && illu_val != "" &&
+        (!identical(illu_val, pacb_val) || is.na(pacb_val))) {
+      return(illumina_ranks[i])
+    }
+  }
+  return("Full match")
+})
+
+#Investigate the ranks the mismatch fisrt occured.
+# Define your preferred order
+rank_order <- c("Full match", "phylum", "class", "order", "family", "genus", "species")
+
+taxonomy_mapped$Mismatch_Rank <- factor(taxonomy_mapped$Mismatch_Rank, levels = rank_order)
+setdiff(unique(taxonomy_mapped$Mismatch_Rank), rank_order)
+
+# Filter out "Full match"
+taxonomy_mismatches_only <- taxonomy_mapped %>%
+  filter(Mismatch_Rank != "Full match")
+
+# Plot only the mismatches
+mismatched_rank <- ggplot(taxonomy_mismatches_only, aes(x = Mismatch_Rank)) +
+  geom_bar(fill = "coral", color = "black", linewidth = 0.2) +
+  theme_bw(base_size = 14) +
+   theme(
+    panel.grid.major = element_blank(),  # Remove major grid lines
+    panel.grid.minor = element_blank(),  # Remove minor grid lines
+    axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1)  # Rotate x-axis labels
+  ) +
+  labs(
+    title = "Rank of First Mismatch",
+    x = "Taxonomic Rank",
+    y = "Number of ASVs"
+  )
+
+mismatched_rank 
+```
+
+##Fig 5d: Abundance of missmatched ones
+```{r}
+# Sum ITS2 ASV counts across all samples
+otu <- data.frame(otu_table(ps_Illumina_ITS2_filt))
+otu$TotalAbundance <- rowSums(otu)
+otu$qseqid <- rownames(otu)
+mismatched_abund <- inner_join(mismatched, otu, by = "qseqid")
+
+#Plot and summary
+summary(mismatched_abund$TotalAbundance)
+hist(mismatched_abund$TotalAbundance/1000, breaks = 100,
+     main = "Abundance of Mismatched ASVs", xlab = "Read Count (k)")
+
+# Sum full-length ITS ASV counts across all samples
+otu <- data.frame(otu_table(ps_PacBio_ITS_filt))
+otu$TotalAbundance <- rowSums(otu)
+otu$sseqid <- rownames(otu)
+
+tax <- data.frame(tax_table(ps_PacBio_ITS_filt))
+tax$sseqid <- rownames(tax)
+
+mismatched_sseqid <- unlist(strsplit(mismatched$matched_sseqids, ";"))
+
+mismatched_pacbio_abund <- otu[otu$sseqid %in% mismatched_sseqid, ]
+mismatched_pacbio_abund <- inner_join(tax, mismatched_pacbio_abund, by = "sseqid")
+
+#Plot and summary
+summary(mismatched_pacbio_abund$TotalAbundance)
+hist(
+  mismatched_pacbio_abund$TotalAbundance / 1000,
+  breaks = 100,
+  main = "Abundance of Full-length ITS ASVs for Mismatched ITS2 ASVs",
+  xlab = "Read Count (k)"
+)
+
+
+```
+
+#Fig 4d: 938 ummapped taxa sequence in ITS2 but not full-length ITS
+```{r}
+ps_Illumina_ITS2_unmapped
+unmapped_taxa_ITS2 <- data.frame(ps_Illumina_ITS2_unmapped@tax_table)
+
+table(unmapped_taxa_ITS2$phylum)
+table(unmapped_taxa_ITS2$family)
+table(unmapped_taxa_ITS2$genus)
+
+# Genus summary
+unmatched_phylum_summary <- unmapped_taxa_ITS2 %>%
+  mutate(phylum = ifelse(is.na(phylum) | phylum == "", "Unclassified", phylum)) %>%
+  group_by(phylum) %>%
+  summarize(n = n()) %>%
+  arrange(desc(n)) %>%
+  slice_max(n, n = 20)
+
+unmatched_phylum <- ggplot(unmatched_phylum_summary, aes(x = reorder(phylum, n), y = n)) +
+  geom_bar(stat = "identity", fill = "orange", color = "black", linewidth = 0.2) +
+  coord_flip() +
+  theme_bw(base_size = 14) +
+  theme(
+    panel.grid.major = element_blank(),  # Remove major grid lines
+    panel.grid.minor = element_blank(),  # Remove minor grid lines
+  )+
+  labs(
+    title = "Phyla of Unmapped ASVs",
+    x = "Phylum",
+    y = "Number of ASVs"
+  )
+
+unmatched_phylum
+
+#Abundance of unmatched:
+# Join with OTU count table
+otu <- data.frame(otu_table(ps_Illumina_ITS2_unmapped))
+otu$TotalAbundance <- rowSums(otu)
+otu$qseqid <- rownames(otu)
+
+# Histogram
+hist(otu$TotalAbundance, breaks = 50,
+     main = "Abundance of Unmmapped ITS2 ASVs",
+     xlab = "Read Count")
+
+#What samples they are in?
+# Plot abundance or prevalence
+plot_bar(ps_Illumina_ITS2_unmapped, fill = "phylum") +
+  facet_wrap(~SampleType, scale = "free")+
+  labs(title = "Abundance of Illumina-only ASVs")+
+theme_bw(base_size = 14) +
+  theme(
+    panel.grid.major = element_blank(),  # Remove major grid lines
+    panel.grid.minor = element_blank(),  # Remove minor grid lines
+    axis.text.x = element_text(angle = 90, hjust = 1, vjust = 1)  # Rotate x-axis labels
+  )
+```
+
+## Fig 4e: Health-related taxa abundance
+```{r}
+# Sample list (expand as needed)
+health_relevant_genera <- c("Alternaria", "Aspergillus", "Aureobasidium", "Bipolaris", "Bjerkandera", "Blastomyces", "Botrytis", "Candida", "Chaetomium", "Cladosporium", "Clavispora", "Coccidioides",
+  "Cryptococcus", "Debaryomyces", "Drechslera", "Epicoccum", "Eurotium", "Fusarium",
+  "Histoplasma", "Malassezia", "Mucor", "Penicillium", "Phoma", "Pichia", "Puccinia",
+  "Rhizopus", "Rhodotorula", "Saccharomyces", "Scopulariopsis", "Stachybotrys",
+  "Stemphylium", "Trichoderma", "Trichophyton", "Ustilago", "Wallemia", "Wickerhamomyces")
+
+unmapped_taxa_ITS2$HealthRelated <- ifelse(
+  unmapped_taxa_ITS2$genus %in% health_relevant_genera, "Yes", "No"
+)
+
+table(unmapped_taxa_ITS2$HealthRelated)
+
+otu <- otu %>% 
+  tibble::rownames_to_column("TaxaID")
+
+unmapped_taxa_ITS2 <- unmapped_taxa_ITS2 %>% 
+  tibble::rownames_to_column("TaxaID")
+
+unmapped_abund <- merge(unmapped_taxa_ITS2, otu, by = "TaxaID")
+
+# Sum their abundance
+summary_by_health <- unmapped_abund %>%
+  filter(HealthRelated == "Yes") %>%
+  group_by(genus) %>%
+  summarize(ReadSum = sum(TotalAbundance)) %>%
+  arrange(desc(ReadSum))
+
+unmapped_abundance_healthgenus <- ggplot(summary_by_health, aes(x = reorder(genus, ReadSum), y = ReadSum)) +
+  geom_bar(stat = "identity", fill = "orange", color = "black", linewidth = 0.2) +
+  coord_flip() +
+  theme_bw(base_size = 14) +
+  theme(
+    panel.grid.major = element_blank(),  # Remove major grid lines
+    panel.grid.minor = element_blank(),  # Remove minor grid lines
+  )+
+  labs(
+    title = "Abundance of unmapped health-related ITS2 ASVs",
+    x = "Genus",
+    y = "Total Read Count"
+  )
+
+unmapped_abundance_healthgenus
+
+#Funguil of unmapped
+summary_by_function <- unmapped_abund %>%
+  group_by(trophicMode) %>%
+  summarize(ReadSum = sum(TotalAbundance)) %>%
+  arrange(desc(ReadSum))
+
+unmapped_abundance_function <- ggplot(summary_by_function, aes(x = reorder(trophicMode, ReadSum), y = ReadSum)) +
+  geom_bar(stat = "identity", fill = "orange", color = "black", linewidth = 0.2) +
+  coord_flip() +
+  theme_bw(base_size = 14) +
+  theme(
+    panel.grid.major = element_blank(),  # Remove major grid lines
+    panel.grid.minor = element_blank(),  # Remove minor grid lines
+  )+
+  labs(
+    title = "Abundance of unmapped taxa",
+    x = "Trophic Mode",
+    y = "Total Read Count"
+  )
+
+unmapped_abundance_function
+
+#Growth form
+summary_by_growthform <- unmapped_abund %>%
+  group_by(growthForm) %>%
+  summarize(ReadSum = sum(TotalAbundance)) %>%
+  arrange(desc(ReadSum))
+
+unmapped_abundance_growthmode <- ggplot(summary_by_growthform, aes(x = reorder(growthForm, ReadSum), y = ReadSum)) +
+  geom_bar(stat = "identity", fill = "orange", color = "black", linewidth = 0.2) +
+  coord_flip() +
+  theme_bw(base_size = 14) +
+  theme(
+    panel.grid.major = element_blank(),  # Remove major grid lines
+    panel.grid.minor = element_blank(),  # Remove minor grid lines
+  )+
+  labs(
+    title = "Abundance of unmapped taxa",
+    x = "Growth Form",
+    y = "Total Read Count"
+  )
+
+unmapped_abundance_growthmode
+```
+#Fig 4d: 4061 Unmapped sequence in PacBio ITS
+```{r}
+ps_PacBio_Fungi_match_unmapped
+unmapped_taxa_ITS <- data.frame(ps_PacBio_Fungi_match_unmapped@tax_table)
+
+table(unmapped_taxa_ITS$Phylum)
+table(unmapped_taxa_ITS$Family)
+table(unmapped_taxa_ITS$Genus)
+
+# Genus summary
+unmatched_phylum_summary <- unmapped_taxa_ITS %>%
+  mutate(Phylum = ifelse(is.na(Phylum) | Phylum == "", "Unclassified", Phylum)) %>%
+  group_by(Phylum) %>%
+  summarize(n = n()) %>%
+  arrange(desc(n)) %>%
+  slice_max(n, n = 20)
+
+unmatched_phylum <- ggplot(unmatched_phylum_summary, aes(x = reorder(Phylum, n), y = n)) +
+  geom_bar(stat = "identity", fill = "deeppink", color = "black", linewidth = 0.2) +
+  coord_flip() +
+  theme_bw(base_size = 14) +
+  theme(
+    panel.grid.major = element_blank(),  # Remove major grid lines
+    panel.grid.minor = element_blank(),  # Remove minor grid lines
+  )+
+  labs(
+    title = "Phyla of Unmapped ASVs",
+    x = "Phylum",
+    y = "Number of ASVs"
+  )
+
+unmatched_phylum
+
+#Abundance of unmatched:
+# Join with OTU count table
+otu <- data.frame(otu_table(ps_PacBio_Fungi_match_unmapped))
+otu$TotalAbundance <- rowSums(otu)
+otu$sseqid <- rownames(otu)
+
+summary(otu$TotalAbundance)
+thresholds <- c(100, 500, 1000, 3000, 5000)
+sapply(thresholds, function(x) {
+  mean(otu$TotalAbundance < x) * 100
+})
+
+# Histogram
+hist(log(otu$TotalAbundance), breaks = 100,
+     main = "Abundance of Unmmapped full-length ITS ASVs",
+     xlab = "log10 Read Count")
+
+#What samples they are in?
+# Plot abundance or prevalence
+plot_bar(ps_PacBio_Fungi_match_unmapped, fill = "Phylum") +
+  facet_wrap(~SampleType, scale = "free")+
+  labs(title = "Abundance of Full-length ITS-only ASVs")+
+theme_bw(base_size = 14) +
+  theme(
+    panel.grid.major = element_blank(),  # Remove major grid lines
+    panel.grid.minor = element_blank(),  # Remove minor grid lines
+    axis.text.x = element_text(angle = 90, hjust = 1, vjust = 1)  # Rotate x-axis labels
+  )
+```
+
+## Fig 4e: Health-related taxa abundance
+```{r}
+# Sample list (expand as needed)
+health_relevant_genera <- c("Alternaria", "Aspergillus", "Aureobasidium", "Bipolaris", "Bjerkandera", "Blastomyces", "Botrytis", "Candida", "Chaetomium", "Cladosporium", "Clavispora", "Coccidioides",
+  "Cryptococcus", "Debaryomyces", "Drechslera", "Epicoccum", "Eurotium", "Fusarium",
+  "Histoplasma", "Malassezia", "Mucor", "Penicillium", "Phoma", "Pichia", "Puccinia",
+  "Rhizopus", "Rhodotorula", "Saccharomyces", "Scopulariopsis", "Stachybotrys",
+  "Stemphylium", "Trichoderma", "Trichophyton", "Ustilago", "Wallemia", "Wickerhamomyces")
+
+unmapped_taxa_ITS$HealthRelated <- ifelse(
+  unmapped_taxa_ITS$Genus %in% health_relevant_genera, "Yes", "No"
+)
+
+table(unmapped_taxa_ITS$HealthRelated)
+
+otu <- otu %>% 
+  tibble::rownames_to_column("TaxaID")
+
+unmapped_taxa_ITS <- unmapped_taxa_ITS %>% 
+  tibble::rownames_to_column("TaxaID")
+
+unmapped_abund <- merge(unmapped_taxa_ITS, otu, by = "TaxaID")
+
+# Sum their abundance
+summary_by_health <- unmapped_abund %>%
+  filter(HealthRelated == "Yes") %>%
+  group_by(Genus) %>%
+  summarize(ReadSum = sum(TotalAbundance)) %>%
+  arrange(desc(ReadSum))
+
+unmapped_abundance_healthgenus <- ggplot(summary_by_health, aes(x = reorder(Genus, ReadSum/1000), y = ReadSum/1000)) +
+  geom_bar(stat = "identity", fill = "deeppink", color = "black", linewidth = 0.2) +
+  coord_flip() +
+  theme_bw(base_size = 14) +
+  theme(
+    panel.grid.major = element_blank(),  # Remove major grid lines
+    panel.grid.minor = element_blank(),  # Remove minor grid lines
+  )+
+  labs(
+    title = "Abundance of unmapped health-related ITS2 ASVs",
+    x = "Genus",
+    y = "Total Read Count (k)"
+  )
+
+unmapped_abundance_healthgenus
+
+#Funguil of unmapped
+summary_by_function <- unmapped_abund %>%
+  group_by(trophicMode) %>%
+  summarize(ReadSum = sum(TotalAbundance)) %>%
+  arrange(desc(ReadSum))
+
+unmapped_abundance_function <- ggplot(summary_by_function, aes(x = reorder(trophicMode, ReadSum), y = ReadSum)) +
+  geom_bar(stat = "identity", fill = "deeppink", color = "black", linewidth = 0.2) +
+  coord_flip() +
+  theme_bw(base_size = 14) +
+  theme(
+    panel.grid.major = element_blank(),  # Remove major grid lines
+    panel.grid.minor = element_blank(),  # Remove minor grid lines
+  )+
+  labs(
+    title = "Abundance of unmapped taxa",
+    x = "Trophic Mode",
+    y = "Total Read Count"
+  )
+
+unmapped_abundance_function
+
+#Growth form
+summary_by_growthform <- unmapped_abund %>%
+  group_by(growthForm) %>%
+  summarize(ReadSum = sum(TotalAbundance)) %>%
+  arrange(desc(ReadSum))
+
+unmapped_abundance_growthmode <- ggplot(summary_by_growthform, aes(x = reorder(growthForm, ReadSum), y = ReadSum)) +
+  geom_bar(stat = "identity", fill = "deeppink", color = "black", linewidth = 0.2) +
+  coord_flip() +
+  theme_bw(base_size = 14) +
+  theme(
+    panel.grid.major = element_blank(),  # Remove major grid lines
+    panel.grid.minor = element_blank(),  # Remove minor grid lines
+  )+
+  labs(
+    title = "Abundance of unmapped taxa",
+    x = "Growth Form",
+    y = "Total Read Count"
+  )
+
+unmapped_abundance_growthmode
+```
+
