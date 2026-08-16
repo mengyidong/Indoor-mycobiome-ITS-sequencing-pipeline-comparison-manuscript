@@ -1,0 +1,652 @@
+---
+title: "Rcode_Reviewer1_DepthRarefaction"
+author: "Mengyi Dong"
+date: "2026-08-06"
+output: html_document
+---
+This document is responding to Reviewer 1's comment on rarefaction and even sequencing depth. We performed rarefaction (1000 depth for both pipelines) and reproduced results for alpha-diversity plots and unmapped ASVs.
+
+#Load packages
+```{r}
+library(phyloseq)
+library(FUNGuildR)
+library(Biostrings)
+library(qiime2R)
+library(tidyr)
+library(dplyr)
+library(ape)
+library(vegan)
+library(tibble)
+library(ggplot2)
+library(stringr)
+library(tibble)
+library(ggpubr)
+library(ggExtra)
+library(ggalluvial)
+```
+
+#Load data
+```{r}
+#The PacBio fungi dataset with only the samples matched Illumina ITS2 dataset
+ps_PacBio_Fungi_match <- readRDS("PacBio/ps_PacBio_Fungi_match_sklearn.rds")
+tax_ITS <- data.frame(ps_PacBio_Fungi_match@tax_table)
+metadata_ITS <- data.frame(ps_PacBio_Fungi_match@sam_data)
+otu_ITS <- data.frame(ps_PacBio_Fungi_match@otu_table)
+
+#The PacBio fungi dataset trimmed to ITS2 region with only samples match Illumina ITS2 dataset
+ps_PacBio_ITS2_match <- readRDS("PacBio/ps_PacBio_ITS2_match.rds")
+tax_pacbio_ITS2 <- data.frame(ps_PacBio_ITS2_match@tax_table)
+metadata_pacbio_ITS2 <- data.frame(ps_PacBio_ITS2_match@sam_data)
+otu_pacbio_ITS2 <- data.frame(ps_PacBio_ITS2_match@otu_table)
+
+#The cleaned Illumina ITS2 dataset
+ps_Illumina_ITS2 <- readRDS("Illumina/ps_Illumina_ITS2_sklearn.rds")
+tax_ITS2 <- data.frame(ps_Illumina_ITS2@tax_table)
+metadata_ITS2 <- data.frame(ps_Illumina_ITS2@sam_data)
+otu_ITS2 <- data.frame(ps_Illumina_ITS2@otu_table)
+```
+
+#Rarefaction
+##Fig S2: determine where a plateau occurs for each dataset
+```{r}
+# Convert to matrix, make sure OTUs are in rows for vegan
+otu_ITS <- t(as(otu_table(ps_PacBio_Fungi_match), "matrix"))
+otu_ITS2 <- t(as(otu_table(ps_Illumina_ITS2), "matrix"))
+otu_ITS2_pacbio <- t(as(otu_table(ps_PacBio_ITS2_match), "matrix"))
+
+otu_ITS2_filt <- otu_ITS2[rowSums(otu_ITS2, na.rm = TRUE) > 1, , drop = FALSE]
+
+# Plot rarefaction curves
+rarecurve(otu_ITS, step = 1000, sample=min(rowSums(otu_ITS)), label = FALSE, col = "deeppink", main = "PacBio ITS Rarefaction")
+rarecurve(otu_ITS2_filt, step = 1000, sample=min(rowSums(otu_ITS2)),label = FALSE, col = "orange", main = "Illumina ITS2 Rarefaction")
+rarecurve(otu_ITS2_pacbio, step = 1000, sample=min(rowSums(otu_ITS2_pacbio)),label = FALSE, col = "deeppink", main = "Trimmed ITS2 Rarefaction")
+```
+
+##Choose a Rarefaction Depth
+```{r}
+summary(sample_sums(ps_PacBio_Fungi_match))
+summary(sample_sums(ps_Illumina_ITS2))
+
+depth_shared <- 1000  # Choose based on previous rarefaction curve
+
+# Rarefy both to same depth
+set.seed(123)
+ps_PacBio_rarefied <- rarefy_even_depth(ps_PacBio_Fungi_match, sample.size = depth_shared, rngseed = 123, verbose = FALSE)
+ps_Illumina_rarefied <- rarefy_even_depth(ps_Illumina_ITS2, sample.size = depth_shared, rngseed = 123, verbose = FALSE)
+
+ps_PacBio_rarefied
+ps_Illumina_rarefied
+
+# Number of non-zero taxa per sample = ASVs detected
+asv_counts_PacBio <- apply(otu_table(ps_PacBio_rarefied), 2, function(x) sum(x > 0))
+asv_counts_Illumina <- apply(otu_table(ps_Illumina_rarefied), 2, function(x) sum(x > 0))
+
+# Convert both vectors to data frames
+common_samples <- intersect(names(asv_counts_PacBio), names(asv_counts_Illumina))
+
+
+asv_df <- data.frame(
+  SampleID = common_samples,
+  ASVs_PacBio = asv_counts_PacBio[common_samples],
+  ASVs_Illumina = asv_counts_Illumina[common_samples]
+)
+
+#Plot for comparison
+summary_ASV_detected <- ggplot(asv_df, aes(x = ASVs_Illumina, y = ASVs_PacBio)) +
+  geom_point(size = 3, alpha = 0.3, color = "black") +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "gray") +
+  theme_bw(base_size = 14) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1)  # Rotate x-axis labels
+  )+
+  labs(x = "ASVs (Short-read)", y = "ASVs (Long-read)", title = paste("ASV Richness Comparison at", depth_shared, "Reads"))
+
+summary_ASV_detected
+
+#Visualize paired difference
+asv_long <- asv_df %>%
+  pivot_longer(cols = starts_with("ASVs"), names_to = "Pipeline", values_to = "ASV_Count")
+
+paired <- ggplot(asv_long, aes(x = Pipeline, y = ASV_Count, group = SampleID)) +
+  geom_line(alpha = 0.3) +
+  geom_point(size = 3, alpha = 0.3) +
+  labs(title = "ASVs Detected per Sample by Pipeline (rarefied to 5000)", y = "Number of ASVs", x = "Pipeline") +
+  theme_bw(base_size = 14)+
+   theme(
+    panel.grid.major = element_blank(),  # Remove major grid lines
+    panel.grid.minor = element_blank(),  # Remove minor grid lines
+    axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1)  # Rotate x-axis labels
+  )
+
+paired
+```
+
+#Subset common samples
+```{r}
+common_samples <- intersect(
+  sample_names(ps_PacBio_rarefied),
+  sample_names(ps_Illumina_rarefied)
+)
+
+length(common_samples)
+
+ps_PacBio_pair <- prune_samples(
+  common_samples,
+  ps_PacBio_rarefied
+)
+
+ps_Illumina_pair <- prune_samples(
+  common_samples,
+  ps_Illumina_rarefied
+)
+
+ps_PacBio_pair <- prune_taxa(
+  taxa_sums(ps_PacBio_pair) > 0,
+  ps_PacBio_pair
+)
+
+ps_Illumina_pair <- prune_taxa(
+  taxa_sums(ps_Illumina_pair) > 0,
+  ps_Illumina_pair
+)
+```
+
+
+#Alpha-diversity group by sample type
+```{r}
+# 1. Compute alpha diversity for each pipeline
+rarefied_ITS2_alpha <- estimate_richness(ps_Illumina_pair,
+                                measures = c("Shannon", "Chao1", "Observed")) %>%
+  mutate(Label = rownames(.),
+         Pipeline = "ITS2")
+
+
+rarefied_ITS_alpha <- estimate_richness(ps_PacBio_pair,
+                                   measures = c("Shannon", "Chao1", "Observed")) %>%
+  mutate(Label = rownames(.),
+         Pipeline = "Full-length ITS")
+
+# 2. Inner join on Label to ensure true pairs
+alpha_pairs <- inner_join(
+  rarefied_ITS2_alpha %>% select(Label, Shannon_ITS2 = Shannon,
+                        Chao1_ITS2 = Chao1, Obs_ITS2 = Observed),
+  rarefied_ITS_alpha %>% select(Label, Shannon_ITS = Shannon,
+                           Chao1_ITS = Chao1, Obs_ITS = Observed),
+  by = "Label"
+)
+
+metadata <- data.frame(ps_Illumina_pair@sam_data)
+alpha_pairs <- left_join(alpha_pairs, metadata, by = "Label")
+
+# Reshape the dataframe
+alpha_long <- alpha_pairs %>%
+  transmute(
+    Label, SampleType, Location,
+    Shannon_ITS2 = Shannon_ITS2, Shannon_ITS = Shannon_ITS,
+    Chao1_ITS2   = Chao1_ITS2,   Chao1_ITS   = Chao1_ITS,
+    Observed_ITS2 = Obs_ITS2,    Observed_ITS = Obs_ITS
+  ) %>%
+  pivot_longer(
+    cols = -c(Label, SampleType, Location),
+    names_to  = c("Metric","Pipeline"),
+    names_sep = "_",
+    values_to = "Value"
+  ) %>%
+  mutate(Pipeline = ifelse(Pipeline == "ITS2", "ITS2", "Full-length ITS"))
+
+# 3. Paired Wilcoxon tests
+paired_alpha_tests <- alpha_long %>%
+  pivot_wider(id_cols = c(Label, SampleType, Metric),
+              names_from = Pipeline,
+              values_from = Value) %>%
+  filter(!is.na(`Full-length ITS`), !is.na(ITS2)) %>%
+  group_by(SampleType, Metric) %>%
+  summarise(
+    n           = n(),
+    median_diff = median(`Full-length ITS` - ITS2, na.rm = TRUE),
+    p_value     = wilcox.test(`Full-length ITS`, ITS2, paired = TRUE,
+                              exact = FALSE)$p.value,
+    W           = wilcox.test(`Full-length ITS`, ITS2, paired = TRUE,
+                              exact = FALSE)$statistic,
+    .groups = "drop"
+  ) %>%
+  group_by(Metric) %>%                # FDR across SampleTypes within each metric
+  mutate(q_value = p.adjust(p_value, method = "BH")) %>%
+  ungroup() %>%
+  mutate(sig = case_when(
+    is.na(q_value)      ~ "",
+    q_value < 0.001     ~ "***",
+    q_value < 0.01      ~ "**",
+    q_value < 0.05      ~ "*",
+    TRUE                ~ "ns"
+  ))
+
+#4. Plot: paired box with lines
+desired_location_order <- c("Control","Dorm", "Home1", "Home2", "Lab1", "Lab2")
+alpha_long$Location <- factor(alpha_long$Location, levels = desired_location_order)
+
+plot_alpha_paired_facet_by_loc <- function(metric_name, ylab) {
+
+  df_plot <- alpha_long %>% 
+    filter(Metric == metric_name) %>%
+    # ensure Location exists (pulled from your metadata join)
+    mutate(Location = factor(Location))      
+
+  # y-position per facet (just above max in that facet)
+  y_max <- df_plot %>%
+    group_by(SampleType) %>%
+    summarise(y = max(Value, na.rm = TRUE), .groups = "drop")
+
+  ann <- paired_alpha_tests %>%
+    filter(Metric == metric_name) %>%
+    select(SampleType, sig, q_value) %>%
+    left_join(y_max, by = "SampleType") %>%
+    mutate(y = y + 0.05 * abs(y),   # headroom for the annotation
+           x = 1.5)
+
+  ggplot(df_plot, aes(x = Pipeline, y = Value, group = Label)) +
+     # side-by-side boxplots per Pipeline (keep neutral fill)
+    geom_boxplot(aes(group = Pipeline),
+                 width = 0.6, fill = "grey88", color = "black",
+                 outlier.shape = NA) +
+    # neutral connecting lines emphasize pairing (not method or location)
+    geom_line(alpha = 0.35, color = "grey55") +
+    # points colored by Location (Dark2)
+    geom_point(aes(color = Location), size = 2, alpha = 0.9,
+               position = position_jitter(width = 0.04, height = 0)) +
+    # significance label per facet (paired Wilcoxon within SampleType)
+    geom_text(data = ann, aes(x = x, y = y, label = sig),
+              inherit.aes = FALSE, size = 5) +
+    scale_color_brewer(palette = "Set2", drop = FALSE) +  # <-- Dark2
+    facet_wrap(~ SampleType, scales = "fixed") +
+    labs(x = "", y = ylab,
+         color = "Location",
+         caption = "Paired Wilcoxon within SampleType; labels: ***<0.001, **<0.01, *<0.05, ns≥0.05") +
+    theme_classic(base_size = 14) +
+    theme(
+      panel.border = element_rect(color = "black", fill = NA),
+      axis.text.x  = element_text(angle = 45, hjust = 1)
+    )
+}
+
+# Build your three panels
+p_shannon  <- plot_alpha_paired_facet_by_loc("Shannon",  "Shannon diversity")
+p_chao1    <- plot_alpha_paired_facet_by_loc("Chao1",    "Chao1 richness")
+p_observed <- plot_alpha_paired_facet_by_loc("Observed", "Observed ASVs")
+
+p_shannon; p_chao1; p_observed
+```
+
+
+#Unmapped ASVs
+```{r}
+# Load libraries
+library(dplyr)
+library(readr)
+
+# Step 1: Load BLAST hits
+blast_hits <- read_tsv("Illumina/Illumina_blast_hits_allpacbio.tsv", col_names = c(
+  "qseqid", "sseqid", "pident", "length", "mismatch", "gapopen",
+  "qstart", "qend", "sstart", "send", "evalue", "bitscore"
+))
+
+seq_asv_map <- tibble(
+  SequenceID = names(refseq(ps_Illumina_pair)),
+  Sequence = as.character(refseq(ps_Illumina_pair))
+)
+
+# Extract taxonomy table
+refseqs <- refseq(ps_PacBio_pair)
+tax <- tax_table(ps_PacBio_pair)
+
+# Convert to data frame and add sequence IDs
+tax_df_ITS <- as.data.frame(tax)
+tax_df_ITS$SequenceID <- names(refseqs)
+
+blast_hits_filt <- blast_hits %>%
+  filter(
+    qseqid %in% seq_asv_map$Sequence,
+    sseqid %in% tax_df_ITS$SequenceID
+  )
+
+blast_hits_filt$qseqid_sequence <-blast_hits_filt$qseqid
+blast_hits_filt$qseqid <- seq_asv_map$SequenceID[
+  match(blast_hits_filt$qseqid_sequence, seq_asv_map$Sequence)
+]
+
+#Mapped hits
+matched_hits <- blast_hits_filt %>%
+  filter(pident >= 99, bitscore > 0)
+
+matched_summary <- matched_hits %>%
+  count(qseqid, sseqid)
+
+#Extract all 100% hits
+hits_100 <- matched_hits %>%
+  filter(pident >= 99.999)
+```
+
+##Subset to mapped and unmapped phyloseq
+```{r}
+ps_Illumina_ITS2_mapped <- subset_taxa(ps_Illumina_pair, taxa_names(ps_Illumina_pair) %in% hits_100$qseqid)
+ps_Illumina_ITS2_unmapped <- subset_taxa(ps_Illumina_pair, !(taxa_names(ps_Illumina_pair) %in% hits_100$qseqid))
+
+ps_PacBio_Fungi_match_mapped <- subset_taxa(ps_PacBio_pair, taxa_names(ps_PacBio_pair) %in% hits_100$sseqid)
+ps_PacBio_Fungi_match_unmapped <- subset_taxa(ps_PacBio_pair, !(taxa_names(ps_PacBio_pair) %in% hits_100$sseqid))
+
+ps_Illumina_ITS2_mapped
+ps_Illumina_ITS2_unmapped
+ps_PacBio_Fungi_match_mapped
+ps_PacBio_Fungi_match_unmapped
+
+Illumina_ITS2_mapped_tax <- data.frame(ps_Illumina_ITS2_mapped@tax_table)
+PacBio_ITS_mapped_tax <- data.frame(ps_PacBio_Fungi_match_mapped@tax_table)
+```
+
+# 436 ummapped taxa sequence in ITS2 but not full-length ITS
+```{r}
+ps_Illumina_ITS2_unmapped
+unmapped_taxa_ITS2 <- data.frame(ps_Illumina_ITS2_unmapped@tax_table)
+
+table(unmapped_taxa_ITS2$phylum)
+table(unmapped_taxa_ITS2$family)
+table(unmapped_taxa_ITS2$genus)
+
+# Genus summary
+unmapped_phylum_summary <- unmapped_taxa_ITS2 %>%
+  mutate(phylum = ifelse(is.na(phylum) | phylum == "", "Unclassified", phylum)) %>%
+  group_by(phylum) %>%
+  summarize(n = n()) %>%
+  arrange(desc(n)) %>%
+  slice_max(n, n = 20)
+
+unmapped_phylum <- ggplot(unmapped_phylum_summary, aes(x = reorder(phylum, n), y = n)) +
+  geom_bar(stat = "identity", fill = "orange", color = "black", linewidth = 0.2) +
+  coord_flip() +
+  theme_bw(base_size = 14) +
+  theme(
+    panel.grid.major = element_blank(),  # Remove major grid lines
+    panel.grid.minor = element_blank(),  # Remove minor grid lines
+  )+
+  labs(
+    title = "Phyla of Unmapped ASVs",
+    x = "Phylum",
+    y = "Number of ASVs"
+  )
+
+unmapped_phylum
+
+#Abundance of unmatched:
+# Join with OTU count table
+otu <- data.frame(otu_table(ps_Illumina_ITS2_unmapped))
+otu$TotalAbundance <- rowSums(otu)
+otu$qseqid <- rownames(otu)
+
+# Histogram
+hist(otu$TotalAbundance, breaks = 50,
+     main = "Abundance of Unmmapped ITS2 ASVs",
+     xlab = "Read Count")
+
+#What samples they are in?
+# Plot abundance or prevalence
+plot_bar(ps_Illumina_ITS2_unmapped, fill = "phylum") +
+  facet_wrap(~SampleType, scale = "free")+
+  labs(title = "Abundance of Illumina-only ASVs")+
+theme_bw(base_size = 14) +
+  theme(
+    panel.grid.major = element_blank(),  # Remove major grid lines
+    panel.grid.minor = element_blank(),  # Remove minor grid lines
+    axis.text.x = element_text(angle = 90, hjust = 1, vjust = 1)  # Rotate x-axis labels
+  )
+```
+
+## Health-related taxa abundance: ITS2
+```{r}
+# Sample list (expand as needed)
+health_relevant_genera <- c("Alternaria", "Aspergillus", "Aureobasidium", "Bipolaris", "Bjerkandera", "Blastomyces", "Botrytis", "Candida", "Chaetomium", "Cladosporium", "Clavispora", "Coccidioides",
+  "Cryptococcus", "Debaryomyces", "Drechslera", "Epicoccum", "Eurotium", "Fusarium",
+  "Histoplasma", "Malassezia", "Mucor", "Penicillium", "Phoma", "Pichia", "Puccinia",
+  "Rhizopus", "Rhodotorula", "Saccharomyces", "Scopulariopsis", "Stachybotrys",
+  "Stemphylium", "Trichoderma", "Trichophyton", "Ustilago", "Wallemia", "Wickerhamomyces")
+
+unmapped_taxa_ITS2$HealthRelated <- ifelse(
+  unmapped_taxa_ITS2$genus %in% health_relevant_genera, "Yes", "No"
+)
+
+table(unmapped_taxa_ITS2$HealthRelated)
+
+otu <- otu %>% 
+  tibble::rownames_to_column("TaxaID")
+
+unmapped_taxa_ITS2 <- unmapped_taxa_ITS2 %>% 
+  tibble::rownames_to_column("TaxaID")
+
+unmapped_abund <- merge(unmapped_taxa_ITS2, otu, by = "TaxaID")
+
+# Sum their abundance
+summary_by_health <- unmapped_abund %>%
+  filter(HealthRelated == "Yes") %>%
+  group_by(genus) %>%
+  summarize(ReadSum = sum(TotalAbundance)) %>%
+  arrange(desc(ReadSum))
+
+unmapped_abundance_healthgenus <- ggplot(summary_by_health, aes(x = reorder(genus, ReadSum), y = ReadSum)) +
+  geom_bar(stat = "identity", fill = "orange", color = "black", linewidth = 0.2) +
+  coord_flip() +
+  theme_bw(base_size = 14) +
+  theme(
+    panel.grid.major = element_blank(),  # Remove major grid lines
+    panel.grid.minor = element_blank(),  # Remove minor grid lines
+  )+
+  labs(
+    title = "Abundance of unmapped health-related ITS2 ASVs",
+    x = "Genus",
+    y = "Total Read Count"
+  )
+
+unmapped_abundance_healthgenus
+```
+
+##Funguil of unmapped: ITS2
+```{r}
+#By function
+summary_by_function <- unmapped_abund %>%
+  group_by(trophicMode) %>%
+  summarize(ReadSum = sum(TotalAbundance)) %>%
+  arrange(desc(ReadSum))
+
+unmapped_abundance_function <- ggplot(summary_by_function, aes(x = reorder(trophicMode, ReadSum), y = ReadSum)) +
+  geom_bar(stat = "identity", fill = "orange", color = "black", linewidth = 0.2) +
+  coord_flip() +
+  theme_bw(base_size = 14) +
+  theme(
+    panel.grid.major = element_blank(),  # Remove major grid lines
+    panel.grid.minor = element_blank(),  # Remove minor grid lines
+  )+
+  labs(
+    title = "Abundance of unmapped taxa",
+    x = "Trophic Mode",
+    y = "Total Read Count"
+  )
+
+unmapped_abundance_function
+
+#Growth form
+summary_by_growthform <- unmapped_abund %>%
+  group_by(growthForm) %>%
+  summarize(ReadSum = sum(TotalAbundance)) %>%
+  arrange(desc(ReadSum))
+
+unmapped_abundance_growthmode <- ggplot(summary_by_growthform, aes(x = reorder(growthForm, ReadSum), y = ReadSum)) +
+  geom_bar(stat = "identity", fill = "orange", color = "black", linewidth = 0.2) +
+  coord_flip() +
+  theme_bw(base_size = 14) +
+  theme(
+    panel.grid.major = element_blank(),  # Remove major grid lines
+    panel.grid.minor = element_blank(),  # Remove minor grid lines
+  )+
+  labs(
+    title = "Abundance of unmapped taxa",
+    x = "Growth Form",
+    y = "Total Read Count"
+  )
+
+unmapped_abundance_growthmode
+```
+
+# 1392 Unmapped sequence in PacBio ITS
+```{r}
+ps_PacBio_Fungi_match_unmapped
+unmapped_taxa_ITS <- data.frame(ps_PacBio_Fungi_match_unmapped@tax_table)
+
+table(unmapped_taxa_ITS$Phylum)
+table(unmapped_taxa_ITS$Family)
+table(unmapped_taxa_ITS$Genus)
+
+# Genus summary
+unmatched_phylum_summary <- unmapped_taxa_ITS %>%
+  mutate(Phylum = ifelse(is.na(Phylum) | Phylum == "", "Unclassified", Phylum)) %>%
+  group_by(Phylum) %>%
+  summarize(n = n()) %>%
+  arrange(desc(n)) %>%
+  slice_max(n, n = 20)
+
+unmatched_phylum <- ggplot(unmatched_phylum_summary, aes(x = reorder(Phylum, n), y = n)) +
+  geom_bar(stat = "identity", fill = "deeppink", color = "black", linewidth = 0.2) +
+  coord_flip() +
+  theme_bw(base_size = 14) +
+  theme(
+    panel.grid.major = element_blank(),  # Remove major grid lines
+    panel.grid.minor = element_blank(),  # Remove minor grid lines
+  )+
+  labs(
+    title = "Phyla of Unmapped ASVs",
+    x = "Phylum",
+    y = "Number of ASVs"
+  )
+
+unmatched_phylum
+
+#Abundance of unmatched:
+# Join with OTU count table
+otu <- data.frame(otu_table(ps_PacBio_Fungi_match_unmapped))
+otu$TotalAbundance <- rowSums(otu)
+otu$sseqid <- rownames(otu)
+
+summary(otu$TotalAbundance)
+thresholds <- c(100, 500, 1000, 3000, 5000)
+sapply(thresholds, function(x) {
+  mean(otu$TotalAbundance < x) * 100
+})
+
+# Histogram
+hist(log(otu$TotalAbundance), breaks = 100,
+     main = "Abundance of Unmmapped full-length ITS ASVs",
+     xlab = "log10 Read Count")
+
+#What samples they are in?
+# Plot abundance or prevalence
+plot_bar(ps_PacBio_Fungi_match_unmapped, fill = "Phylum") +
+  facet_wrap(~SampleType, scale = "free")+
+  labs(title = "Abundance of Full-length ITS-only ASVs")+
+theme_bw(base_size = 14) +
+  theme(
+    panel.grid.major = element_blank(),  # Remove major grid lines
+    panel.grid.minor = element_blank(),  # Remove minor grid lines
+    axis.text.x = element_text(angle = 90, hjust = 1, vjust = 1)  # Rotate x-axis labels
+  )
+```
+
+## Health-related taxa abundance: full-length ITS
+```{r}
+# Sample list (expand as needed)
+health_relevant_genera <- c("Alternaria", "Aspergillus", "Aureobasidium", "Bipolaris", "Bjerkandera", "Blastomyces", "Botrytis", "Candida", "Chaetomium", "Cladosporium", "Clavispora", "Coccidioides",
+  "Cryptococcus", "Debaryomyces", "Drechslera", "Epicoccum", "Eurotium", "Fusarium",
+  "Histoplasma", "Malassezia", "Mucor", "Penicillium", "Phoma", "Pichia", "Puccinia",
+  "Rhizopus", "Rhodotorula", "Saccharomyces", "Scopulariopsis", "Stachybotrys",
+  "Stemphylium", "Trichoderma", "Trichophyton", "Ustilago", "Wallemia", "Wickerhamomyces")
+
+unmapped_taxa_ITS$HealthRelated <- ifelse(
+  unmapped_taxa_ITS$Genus %in% health_relevant_genera, "Yes", "No"
+)
+
+table(unmapped_taxa_ITS$HealthRelated)
+
+otu <- otu %>% 
+  tibble::rownames_to_column("TaxaID")
+
+unmapped_taxa_ITS <- unmapped_taxa_ITS %>% 
+  tibble::rownames_to_column("TaxaID")
+
+unmapped_abund <- merge(unmapped_taxa_ITS, otu, by = "TaxaID")
+
+# Sum their abundance
+summary_by_health <- unmapped_abund %>%
+  filter(HealthRelated == "Yes") %>%
+  group_by(Genus) %>%
+  summarize(ReadSum = sum(TotalAbundance)) %>%
+  arrange(desc(ReadSum))
+
+unmapped_abundance_healthgenus <- ggplot(summary_by_health, aes(x = reorder(Genus, ReadSum/1000), y = ReadSum/1000)) +
+  geom_bar(stat = "identity", fill = "deeppink", color = "black", linewidth = 0.2) +
+  coord_flip() +
+  theme_bw(base_size = 14) +
+  theme(
+    panel.grid.major = element_blank(),  # Remove major grid lines
+    panel.grid.minor = element_blank(),  # Remove minor grid lines
+  )+
+  labs(
+    title = "Abundance of unmapped health-related ITS2 ASVs",
+    x = "Genus",
+    y = "Total Read Count (k)"
+  )
+
+unmapped_abundance_healthgenus
+```
+
+##Funguil of unmapped: full-length ITS
+```{r}
+#By function
+summary_by_function <- unmapped_abund %>%
+  group_by(trophicMode) %>%
+  summarize(ReadSum = sum(TotalAbundance)) %>%
+  arrange(desc(ReadSum))
+
+unmapped_abundance_function <- ggplot(summary_by_function, aes(x = reorder(trophicMode, ReadSum), y = ReadSum)) +
+  geom_bar(stat = "identity", fill = "deeppink", color = "black", linewidth = 0.2) +
+  coord_flip() +
+  theme_bw(base_size = 14) +
+  theme(
+    panel.grid.major = element_blank(),  # Remove major grid lines
+    panel.grid.minor = element_blank(),  # Remove minor grid lines
+  )+
+  labs(
+    title = "Abundance of unmapped taxa",
+    x = "Trophic Mode",
+    y = "Total Read Count"
+  )
+
+unmapped_abundance_function
+
+#Growth form
+summary_by_growthform <- unmapped_abund %>%
+  group_by(growthForm) %>%
+  summarize(ReadSum = sum(TotalAbundance)) %>%
+  arrange(desc(ReadSum))
+
+unmapped_abundance_growthmode <- ggplot(summary_by_growthform, aes(x = reorder(growthForm, ReadSum), y = ReadSum)) +
+  geom_bar(stat = "identity", fill = "deeppink", color = "black", linewidth = 0.2) +
+  coord_flip() +
+  theme_bw(base_size = 14) +
+  theme(
+    panel.grid.major = element_blank(),  # Remove major grid lines
+    panel.grid.minor = element_blank(),  # Remove minor grid lines
+  )+
+  labs(
+    title = "Abundance of unmapped taxa",
+    x = "Growth Form",
+    y = "Total Read Count"
+  )
+
+unmapped_abundance_growthmode
+```

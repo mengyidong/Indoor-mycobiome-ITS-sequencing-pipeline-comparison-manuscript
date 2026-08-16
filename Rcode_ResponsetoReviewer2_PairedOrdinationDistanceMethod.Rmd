@@ -1,0 +1,162 @@
+---
+title: "Rcode_Reviewer2_pairedordination"
+author: "Mengyi Dong"
+date: "2026-08-16"
+output: html_document
+---
+This document is responding to Reviewer 2's comment 6 on paried ordination method selection. Here we used euclidean distance of clr-transformed datasets, and plotted PCoA ordination.
+
+#Load packages
+```{r}
+library(phyloseq)
+library(FUNGuildR)
+library(Biostrings)
+library(qiime2R)
+library(tidyr)
+library(dplyr)
+library(ape)
+library(vegan)
+library(tibble)
+library(ggplot2)
+library(stringr)
+library(tibble)
+library(ggpubr)
+library(ggExtra)
+library(ggalluvial)
+```
+
+#Load data
+```{r}
+#The PacBio fungi dataset with only the samples matched Illumina ITS2 dataset
+ps_PacBio_Fungi_match <- readRDS("PacBio/ps_PacBio_Fungi_match_sklearn.rds")
+tax_ITS <- data.frame(ps_PacBio_Fungi_match@tax_table)
+metadata_ITS <- data.frame(ps_PacBio_Fungi_match@sam_data)
+otu_ITS <- data.frame(ps_PacBio_Fungi_match@otu_table)
+
+#The PacBio fungi dataset trimmed to ITS2 region with only samples match Illumina ITS2 dataset
+ps_PacBio_ITS2_match <- readRDS("PacBio/ps_PacBio_ITS2_match.rds")
+tax_pacbio_ITS2 <- data.frame(ps_PacBio_ITS2_match@tax_table)
+metadata_pacbio_ITS2 <- data.frame(ps_PacBio_ITS2_match@sam_data)
+otu_pacbio_ITS2 <- data.frame(ps_PacBio_ITS2_match@otu_table)
+
+#The cleaned Illumina ITS2 dataset
+ps_Illumina_ITS2 <- readRDS("Illumina/ps_Illumina_ITS2_sklearn.rds")
+tax_ITS2 <- data.frame(ps_Illumina_ITS2@tax_table)
+metadata_ITS2 <- data.frame(ps_Illumina_ITS2@sam_data)
+otu_ITS2 <- data.frame(ps_Illumina_ITS2@otu_table)
+```
+
+#Good's coverage ITS2
+```{r}
+#Good’s coverage = 1 - (singletons / total reads) per sample
+goods_coverage <- function(ps) {
+  mat <- as(otu_table(ps), "matrix")
+  if (!taxa_are_rows(ps)) mat <- t(mat)
+  # counts: taxa x samples
+  singles <- colSums(mat == 1)
+  totals  <- colSums(mat)
+  tibble(sample_id = colnames(mat),
+         goods = 1 - (singles / totals))
+}
+
+gc_its2 <- goods_coverage(ps_Illumina_ITS2)
+summary(gc_its2$goods)
+
+gc_its <- goods_coverage(ps_PacBio_Fungi_match)
+summary(gc_its$goods)
+
+#Low coverage outlier
+low_cov <- gc_its2 %>% arrange(goods) %>% head(3)
+low_cov
+
+# decide a threshold (e.g., < 0.90); report n low-coverage samples
+sum(gc_its2$goods < 0.90, na.rm = TRUE)
+sum(gc_its$goods < 0.90, na.rm = TRUE)
+
+# Optional: drop extremely low-coverage samples from ITS2 *and* their paired PacBio samples
+drop_ids <- gc_its2 %>% filter(goods < 0.90) %>% pull(sample_id)
+drop_ids
+ps_Illumina_ITS2_filt <- prune_samples(!(sample_names(ps_Illumina_ITS2) %in% drop_ids), ps_Illumina_ITS2)
+ps_Illumina_ITS2_filt <- prune_taxa(taxa_sums(ps_Illumina_ITS2_filt) > 0, ps_Illumina_ITS2_filt)
+ps_PacBio_ITS_filt <- prune_samples(sample_names(ps_Illumina_ITS2_filt), ps_PacBio_Fungi_match)
+ps_PacBio_ITS_filt <- prune_taxa(taxa_sums(ps_PacBio_ITS_filt) > 0, ps_PacBio_ITS_filt)
+ps_PacBio_ITS2_filt <- prune_samples(sample_names(ps_Illumina_ITS2_filt), ps_PacBio_ITS2_match)
+ps_PacBio_ITS2_filt <- prune_taxa(taxa_sums(ps_PacBio_ITS2_filt) > 0, ps_PacBio_ITS2_filt)
+
+#Report coverage
+n_total <- nrow(gc_its2)
+n_ge95  <- sum(gc_its2$goods >= 0.95, na.rm = TRUE)
+paste0(n_ge95, "/", n_total, " (", round(100*n_ge95/n_total), "%) of ITS2 samples ≥ 0.95 coverage.")
+```
+
+#Prepare phyloseq objects
+```{r}
+ps_Illumina_ITS2_filt
+ps_PacBio_ITS_filt
+
+#Transform to relative abundance
+ps_Illumina_ITS2_clr <- microbiome::transform(ps_Illumina_ITS2_filt,"clr")
+ps_PacBio_Fungi_match_clr <- microbiome::transform(ps_PacBio_ITS_filt,"clr")
+
+#Make sure sample name match
+common_samples <- intersect(sample_names(ps_Illumina_ITS2_clr), 
+                            sample_names(ps_PacBio_Fungi_match_clr))
+
+ps_Illumina_common <- prune_samples(common_samples, ps_Illumina_ITS2_clr)
+ps_PacBio_common   <- prune_samples(common_samples, ps_PacBio_Fungi_match_clr)
+
+ps_Illumina_common <- prune_taxa(taxa_sums(ps_Illumina_common) > 0, ps_Illumina_common)
+ps_PacBio_common   <- prune_taxa(taxa_sums(ps_PacBio_common) > 0, ps_PacBio_common)
+```
+
+##Fig 2b: Paired Ordination and PERMANOVA
+```{r}
+#Prepare data
+sample_data(ps_Illumina_common)$Workflow <- "ITS2"
+sample_data(ps_PacBio_common)$Workflow  <- "Full-length ITS"
+
+sample_names(ps_Illumina_common) <- paste0(sample_names(ps_Illumina_common), "_Illumina")
+sample_names(ps_PacBio_common)   <- paste0(sample_names(ps_PacBio_common), "_PacBio")
+
+sample_data(ps_Illumina_common)$PairID <- gsub("_Illumina$", "", sample_names(ps_Illumina_common))
+sample_data(ps_PacBio_common)$PairID   <- gsub("_PacBio$", "", sample_names(ps_PacBio_common))
+
+taxa_names(ps_Illumina_common) <- paste0("ITS2_", taxa_names(ps_Illumina_common))
+taxa_names(ps_PacBio_common)   <- paste0("ITSfull_", taxa_names(ps_PacBio_common))
+
+ps_combined <- merge_phyloseq(ps_Illumina_common, ps_PacBio_common)
+ps_combined <- prune_samples(sample_sums(ps_combined) > 0, ps_combined)
+
+#Euclidean distance
+dist.eu <- phyloseq::distance(ps_combined, method = "euclidean")
+
+adonis2(
+  dist.eu ~ Workflow + SampleType + Location,
+  data = data.frame(sample_data(ps_combined)),
+  permutations = 10000,
+  strata = sample_data(ps_combined)$PairID,
+  by = "terms"
+)
+
+#Plot
+ord <- ordinate(ps_combined, method = "NMDS", distance = "euclidean")
+paired_ordination <- plot_ordination(ps_combined, ord, color = "Workflow", shape = "SampleType") + 
+   geom_point(size = 2.5, alpha = 0.8) +
+   facet_wrap(~ Location) + 
+   stat_ellipse(aes(group = Workflow), type = "norm", linetype = "dashed", size = 1, alpha = 0.5) +
+   scale_color_manual(values = c(
+   "Full-length ITS" = "deeppink",
+   "ITS2" = "orange")) + 
+   scale_fill_manual(values = c(
+   "Full-length ITS" = "deeppink",
+   "ITS2" = "orange")) +
+   theme_bw(base_size = 14) +
+   theme(
+     panel.grid = element_blank(),
+     legend.position = "right",
+     plot.title = element_text(face = "bold", size = 18),
+     plot.subtitle = element_text(size = 12)
+   )
+
+paired_ordination + geom_line(aes(group = PairID),color = "grey60", alpha = 0.4)
+```
