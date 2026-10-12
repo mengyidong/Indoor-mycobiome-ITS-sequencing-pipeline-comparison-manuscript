@@ -24,9 +24,8 @@ Illumina ITS2 processing workflow.
 | File | Description |
 |------|-------------|
 | 1_ITS2-SequencePretreat.txt | Read preprocessing and sequence preparation steps. |
-| 2_ITS2-pipeline.sh | Main ITS2 sequence-processing pipeline. |
-| 3_ITS2-ClusterDada2.sh | DADA2 denoising and ASV inference workflow. |
-| 4_ITS2-taxclassifier.sh | Taxonomic assignment workflow. |
+| 2_ITS2-pipeline.sh | Main ITS2 sequence-processing pipeline, including data import, denoising, filtering, ASV calling, and make feature tables. |
+| 3_ITS2-taxclassifier.sh | Taxonomic assignment workflow using the sklearn taxonomy classifier. |
 
 ---
 
@@ -36,7 +35,7 @@ PacBio HiFi full-length ITS processing workflow.
 | File | Description |
 |------|-------------|
 | R_PacBio_ITS_pipeline.Rmd | DADA2-based PacBio ITS processing and analysis workflow. |
-| PacBio_ITS_sklearn_TaxonomyClassifier.sh | Taxonomic classification workflow and outputs |
+| PacBio_ITS_sklearn_TaxonomyClassifier.sh | Taxonomic classification workflow and outputs. |
 
 ---
 ## QIMME2_Output
