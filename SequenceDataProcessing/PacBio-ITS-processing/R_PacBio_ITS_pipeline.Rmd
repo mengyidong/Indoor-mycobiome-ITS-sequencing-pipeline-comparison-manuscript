@@ -1,0 +1,323 @@
+---
+# PacBio ITS processing workflow for [PreMiEr Project/manuscript]
+# Adapted from Benjamin Callahan's public PacBio pipeline:
+# https://benjjneb.github.io/LRASManuscript/LRASms_fecal.html
+# Project-specific modifications by Mengyi Dong and Eva Kim
+---
+# Load libraries and directories
+```{r}
+#Install missing packages
+BiocManager::install("dada2")
+BiocManager::install("phyloseq")
+BiocManager::install("seqTools")
+```
+
+```{r}
+library(dada2)
+library(magrittr)
+library(phyloseq)
+library(fs)
+library(ShortRead)
+library(Biostrings)
+library(tidyverse)
+library(vegan)
+library(tools)
+library(seqTools)
+```
+
+```{r}
+rm(list=ls()) # clear environment 
+
+# Project-related directories: change as needed! 
+dmc.dir = file.path("/data/folder/PacBio_pipeline") # CHANGE ME to parent directory
+git.dir = file.path(dmc.dir, "ITS") # CHANGE ME to project directory
+data.dir = file.path(dmc.dir, "ITS") # CHANGE ME to where sequencing files are stored (.fastq.gz)
+
+# Read in metadata: Change as needed! 
+meta.file = file.path(dmc.dir, "metadata_ITS.csv") # CHANGE ME to where metadata file is 
+meta.df = read_csv(meta.file)
+
+# Directories for temporary files 
+scratch.dir = file.path("/output/data/temp") # CHANGE ME to project work directory
+### change me to your NetID!! If you don't have a work folder already, create one by running the following codes on Terminal portion of RStudio: 
+### cd /work/
+### mkdir NETID          
+
+output.dir = path.expand(file.path(scratch.dir, paste0("output")))
+
+### Note: you only need to make your work directory ONCE! Don't run this if already have the folders setup, it will erase any previous settings.
+if (dir_exists(scratch.dir)) {
+  dir_delete(scratch.dir)
+}
+dir_create(scratch.dir)
+
+if (dir_exists(output.dir)) {
+  dir_delete(output.dir)
+}
+dir_create(output.dir)
+
+noprimers.dir = path.expand(file.path(scratch.dir,paste0("noprimers")))
+### Note: you only need to make your work directory ONCE! Don't run this if already have the folders setup, it will erase any previous settings.
+dir_create(noprimers.dir)
+
+filt.dir = path.expand(file.path(scratch.dir,paste0("filt")))
+### Note: you only need to make your work directory ONCE! Don't run this if already have the folders setup, it will erase any previous settings.
+dir_create(filt.dir)
+
+# Bash shortcuts
+Sys.setenv(SCRATCH_DIR = scratch.dir)
+Sys.setenv(OUT_DIR = output.dir)
+Sys.setenv(DATA_DIR = data.dir)
+Sys.setenv(FILT_DIR = filt.dir)
+Sys.setenv(NOPRIMERS_DIR = noprimers.dir)
+
+# Ref database
+### Unite database: 2/19/25, all eukaryotes downloaded from https://doi.plutof.ut.ee/doi/10.15156/BIO/3301231
+### see https://benjjneb.github.io/dada2/training.html for Dr. Callhan's recommendation for this database
+
+database.dir = file.path("/data/folder/Reference") # CHANGE ME to database folder 
+unite.ref = path.expand(file.path(database.dir, paste0("sh_general_release_dynamic_all_19.02.2025_dev.fasta")))
+```
+
+```{r}
+old <- Sys.time() # get start time
+```
+
+## Check that metadata and file names match
+```{r}
+meta.df %>% arrange(Primer_ID) %>% 
+  dplyr::mutate(group = str_extract(Sample_Name, ".*(?=\\_)")) %>% 
+  group_by(group) %>% dplyr::count(group)
+```
+
+```{r}
+meta.df %>% 
+  mutate(group = str_extract(Sample_Name, ".*(?=\\_)"),
+         group = replace_na(group, "PCRneg"),
+         Primer_ID = str_replace_all(Primer_ID, "ITS", "16S")) -> meta.full
+
+meta.full
+```
+
+```{r}
+fns <- sort(list.files(data.dir, pattern=".hifi_reads.fastq.gz", full.names = TRUE)) # forward reads
+head(fns)
+```
+
+```{r}
+sample.names <- unlist(meta.full$Primer_ID)
+length(sample.names)
+length(meta.full$Primer_ID)
+
+any((meta.full$Primer_ID %in% sample.names)==FALSE) # are there any sample names in metadata file that are not present in the sample names extracted from fastq files? 
+
+meta.full$Primer_ID %in% sample.names
+```
+
+#Remove primers and orient reads
+```{r}
+ITS1catta <- "ACCWGCGGARGGATCATTA"
+ITS4ngsUni <- "CCTSCSCTTANTDATATGC"
+
+nops <- file.path(noprimers.dir, "noprimers", basename(fns))
+primers_removed <- removePrimers(fns, nops, primer.fwd=ITS1catta, primer.rev=dada2:::rc(ITS4ngsUni), orient=TRUE, verbose = TRUE)
+```
+
+
+```{r}
+primers_removed %>% as.data.frame() %>%
+  mutate(percent_filtered = (reads.in - reads.out) / reads.in * 100)
+```
+
+
+
+#Filter & Trim
+```{r}
+filts <- file.path(filt.dir, "noprimers", "filtered", sample.names)
+track <- filterAndTrim(nops, filts, minQ=3, minLen=250, maxLen=1200, maxN=0, rm.phix=FALSE, maxEE=3) # compare to maxEE = 2 (previously run)
+```
+
+```{r}
+track %>% as.data.frame() %>%
+  mutate(percent_filtered = (reads.in - reads.out) / reads.in * 100) -> track.df
+
+track.df
+```
+
+```{r}
+track.df %>% summary()
+```
+
+```{r}
+lens.fn <- lapply(filts, function(fn) nchar(getSequences(fn)))
+lens <- do.call(c, lens.fn)
+hist(lens, 50)
+```
+
+```{r}
+plotQualityProfile(filts[1:130], aggregate = T) -> p.q3
+
+p.q3 + labs(title = "After filtering & trimming")
+```
+
+#Dereplicate
+```{r}
+dereps <- derepFastq(filts, verbose=TRUE)
+```
+
+#Error correction
+###For PacBio, Ben seems to be doing dereplicating then error correcting.
+```{r}
+err <- learnErrors(filts, errorEstimationFunction=PacBioErrfun,  multithread=TRUE) 
+```
+
+```{r}
+plotErrors(err, nominalQ=TRUE)
+```
+
+#DADA2
+```{r}
+dadas <- dada(dereps, err=err, multithread=TRUE)
+```
+
+#QC: Sequence length
+```{r}
+seqtab <- makeSequenceTable(dadas)
+table(nchar(getSequences(seqtab)))
+```
+
+###Since this table can be hard to read when long, let’s turn this into a dataframe and graph this instead.
+```{r}
+nchar(getSequences(seqtab)) %>% as_tibble() -> amplicon.df
+
+# This is number of ASVs of this length 
+read_length_distribution <- ggplot(amplicon.df, aes(x=value)) + theme_bw()+ 
+ geom_histogram(binwidth=1) + 
+ labs(title = "ASV Length Distribution", x = "ASV Length (bp)", y = "Frequency")
+
+read_length_distribution
+```
+
+#Chimera Removal
+```{r}
+seqtab.nochim <- removeBimeraDenovo(seqtab, method="consensus", minFoldParentOverAbundance = 3.5, multithread=TRUE, verbose=TRUE)
+
+dim(seqtab.nochim)
+
+sum(seqtab.nochim)/sum(seqtab) * 100
+```
+
+#Track reads through pipeline
+```{r}
+track.df
+```
+
+```{r}
+cbind(ccs=primers_removed[,1], primers=primers_removed[,2], filtered=track.df[,2], denoised=sapply(dadas, function(x) sum(x$denoised)), nonchim = rowSums(seqtab.nochim)) -> reads.df
+
+reads.df
+```
+
+```{r}
+reads.df %>% 
+  as.data.frame() %>% 
+  rownames_to_column("Primer_ID") %>% 
+  pivot_longer(
+  cols = c(ccs:nonchim), 
+  names_to = "stage",
+  values_to = "counts"
+)  %>%  mutate(stage=factor(stage, levels = c('ccs','primers','filtered','denoised','nonchim'))) %>%
+  dplyr::mutate(counts = as.numeric(counts)) -> track.graph
+
+track.graph %>%
+  left_join(meta.full, by = "Primer_ID") %>% 
+    ggplot(mapping=aes(x=stage, y=counts, by=Primer_ID, group = Primer_ID, color = group)) +
+    geom_line(alpha=0.5) + 
+    theme_classic() +labs(x = "DADA2 Stage", y = "Number of Reads")
+```
+
+##Check Number of Samples
+```{r}
+meta.full %>% dim()
+
+dim(seqtab.nochim)
+```
+
+#Assign taxonomy
+For plotting purposes, having ASV numbers (ex. ASV1-ASV999) is easier, but it’s also useful to have the whole DNA sequences as the RefSeq object.
+##UNITE database
+```{r}
+taxa <- assignTaxonomy(seqtab.nochim, unite.ref, multithread=TRUE)
+```
+
+```{r}
+taxa.print <- taxa # Removing sequence rownames for display only
+rownames(taxa.print) <- NULL
+head(taxa.print)
+```
+
+```{r}
+taxa.print %>% as.data.frame() -> taxa.df
+taxa.df %>% filter(is.na(Species) == FALSE) %>% nrow() -> n.species
+taxa.df %>% filter(is.na(Genus) == FALSE) %>% nrow() -> n.genus
+taxa.df %>% nrow() -> n.taxa
+
+n.species / n.taxa * 100
+
+n.genus / n.taxa * 100
+
+n.species / n.genus * 100
+```
+
+```{r}
+meta.full %>% column_to_rownames("Primer_ID") -> meta.ps.df # Change SeqName into rownames for passing off to phyloseq
+meta.ps.df %>% head()
+
+rownames(seqtab.nochim)
+```
+
+```{r}
+all(rownames(seqtab.nochim) %in% rownames(meta.ps.df))
+```
+
+#Save and export as phyloseq object
+```{r}
+otus = otu_table(seqtab.nochim, taxa_are_rows=FALSE)
+sd = sample_data(meta.ps.df)
+ps <- phyloseq(otus,
+               sd,
+               tax_table(taxa))
+```
+
+```{r}
+# Extract DNA sequences and add them as reference sequences 
+dna <- Biostrings::DNAStringSet(taxa_names(ps))
+names(dna) <- taxa_names(ps)
+ps@refseq <- dna
+ps
+```
+
+```{r}
+# Give ASVs numbers which are easier for graphing & analyzing than the full sequence 
+taxa_names(ps) <- paste0("ASV", seq(ntaxa(ps)))  
+ps
+```
+
+```{r}
+# Export final phyloseq object and check that it was written and saved correctly 
+ps.rds = file.path(git.dir, paste0("ITS_UNITE.rds"))
+saveRDS(ps, ps.rds)
+loaded.ps = read_rds(ps.rds)
+print(loaded.ps)
+```
+
+```{r}
+new <- Sys.time() - old # calculate difference
+print(new) # print in nice format
+```
+
+#Reproducibility
+```{r}
+sessionInfo()
+```
+
