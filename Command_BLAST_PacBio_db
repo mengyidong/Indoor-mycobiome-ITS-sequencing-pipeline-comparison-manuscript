@@ -1,0 +1,53 @@
+# Step 0: Pull a Singularity container with BLAST from NCBI 
+
+singularity pull docker://ncbi/blast
+
+# Step 1: Build BLAST database from PacBio reference sequences
+
+singularity exec blast_latest.sif makeblastdb -in pacbio_refseq.fasta -dbtype nucl -out pacbio_db
+
+# Step 2: Run BLAST of Illumina ITS2 sequences against PacBio DB
+
+singularity exec blast_latest.sif blastn \
+  -query illumina_rep_seqs.fasta \
+  -db pacbio_db \
+  -out illumina_vs_pacbio.tsv \
+  -outfmt 6 \
+  -evalue 1e-20 \
+  -perc_identity 97
+
+# Step 3: Assign taxonomy using PacBio_db
+
+singularity exec /folder/to/qiime2.sif \
+qiime tools import \
+  --input-path pacbio_refseq.fasta \
+  --output-path pacbio_refseq.qza \
+  --type 'FeatureData[Sequence]'
+
+singularity exec /folder/to/qiime2.sif \
+qiime tools import \
+  --type 'FeatureData[Taxonomy]' \
+  --input-format HeaderlessTSVTaxonomyFormat \
+  --input-path pacbio_taxonomy_formatted.tsv \
+  --output-path pacbio_taxonomy.qza
+
+singularity exec /folder/to/qiime2.sif \
+qiime feature-classifier classify-consensus-blast \
+  --i-query Illumina_refseqs.qza \
+  --i-reference-reads pacbio_refseq.qza \
+  --i-reference-taxonomy pacbio_taxonomy.qza \
+  --o-search-results illumina_blast_hits.qza \
+  --o-classification illumina_taxonomy.qza \
+  --p-perc-identity 0.97 \
+  --p-maxaccepts 10
+
+# Step 4: export to TSV
+singularity exec /folder/to/qiime2.sif \
+qiime tools export \
+  --input-path illumina_blast_hits.qza \
+  --output-path illumina_blast_hits_exported
+
+singularity exec /folder/to/qiime2.sif \
+qiime tools export \
+  --input-path illumina_taxonomy.qza \
+  --output-path illumina_taxonomy_exported
