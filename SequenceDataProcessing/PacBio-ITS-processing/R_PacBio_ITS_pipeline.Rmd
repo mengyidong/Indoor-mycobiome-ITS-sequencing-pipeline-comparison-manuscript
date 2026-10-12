@@ -295,6 +295,9 @@ dna <- Biostrings::DNAStringSet(taxa_names(ps))
 names(dna) <- taxa_names(ps)
 ps@refseq <- dna
 ps
+
+# Extract refseq.fasta to use QIIME2 sklearn taxonomy classifier
+writeXStringSet(dna, filepath = "PacBio/pacbio_refseq.fasta", format = "fasta")
 ```
 
 ```{r}
