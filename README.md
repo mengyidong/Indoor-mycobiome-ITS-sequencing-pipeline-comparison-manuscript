@@ -1,25 +1,63 @@
 # Indoor Mycobiome ITS2 vs Full‑Length ITS Comparison
-This repository contains code, processed data, metadata, and supporting files for:
- 
+This repository contains data, metadata, bioinformatic workflows, command code, and statistical analyses supporting the manuscript:
 "Benchmarking Short-Read ITS2 and Long-Read Full-Length ITS Sequencing Reveals Pipeline-Dependent Biases in Indoor Fungal Community Profiling"
 
 Authors: Mengyi Dong1,2,3, Denene Blackwood4, Megan Lott5, Sherlynette Pérez Castro2, Javier Gallard-Góngora2, Thomas J. Clerkin2, Heather Hemric1, Jake Nash6,7, Yeon Ji Kim1, Jason W. Arnold1, Lawrence A. David1, Rytas J. Vilgalys4, Anthony A. Fodor8, Rachel T. Noble2
 
-Overview
+# Repository Overview
 This project presents a paired comparison of short‑read ITS2 and long‑read full‑length ITS sequencing for profiling fungal communities in the built environment. Using identical DNA extracts from indoor air and surface samples, we evaluate how amplicon length, primer targeting, and sequencing strategy influence fungal taxonomic resolution, community composition, and detection of health‑relevant taxa.
 The analyses implement classifier parity, in‑silico ITS2 trimming of long‑read sequences, cross‑platform ASV mapping, and phylogenetic comparisons to disentangle the effects of amplicon length from sequencing platform.
-
-# Repository Contents
  
-## Repository Structure
+# Repository Structure
 
-### metadata.tsv
+## metadata.tsv
 
-Metadata file that link accession number to file name and sample ID.
+Tab-delimited sample metadata file that link accession number to file name and sample ID.
 
-### Illumina/
+## SequenceDataProcessing/
 
-Files derived from the ITS2 (Illumina) sequencing workflow.
+Contains bioinformatic workflows used to process raw sequence data.
+
+### SequenceDataProcessing/Illumina-ITS2-processing/
+Illumina ITS2 processing workflow.
+
+| File | Description |
+|------|-------------|
+| 1_ITS2-SequencePretreat.txt | Read preprocessing and sequence preparation steps. |
+| 2_ITS2-pipeline.sh | Main ITS2 sequence-processing pipeline. |
+| 3_ITS2-ClusterDada2.sh | DADA2 denoising and ASV inference workflow. |
+| 4_ITS2-taxclassifier.sh | Taxonomic assignment workflow. |
+
+---
+
+### SequenceDataProcessing/PacBio-ITS-processing/
+PacBio HiFi full-length ITS processing workflow.
+
+| File | Description |
+|------|-------------|
+| R_PacBio_ITS_pipeline.Rmd | DADA2-based PacBio ITS processing and analysis workflow. |
+| PacBio_ITS_sklearn_TaxonomyClassifier.sh | Taxonomic classification workflow and outputs |
+
+---
+## QIMME2_Output
+QIIME2 artifacts generated during processing and taxonomic assignment.
+| File | Description |
+|------|-------------|
+| illumina_refseq.qza | Representative ITS2 ASV sequences. |
+| illumina_blast_hits.qza | BLAST-mapped ITS2 sequences against the generated full-length ITS reference database. |
+| illumina_taxonomy.qza | ITS2 taxonomic assignments. |
+| illumina_taxonomy.qzv | Interactive taxonomy visualization. |
+| pacbio_ITS2_taxonomy.qza | PacBio-derived ITS2 taxonomy from trimmed ITS2 region. |
+| pacbio_ITS_taxonomy_sklearn.qza | Full-length ITS taxonomy assignments. |
+| pacbio_refseq_sklearn.qza | PacBio representative sequences used for PacBio_ITS_sklearn_TaxonomyClassifier.sh |
+
+These files can be viewed in QIIME2 View: https://view.qiime2.org
+
+---
+
+## Illumina/
+
+Data files derived from the ITS2 (Illumina) sequencing workflow and used in data analysis (Rcode_main.Rmd).
 
 | File | Description |
 |------|-------------|
@@ -35,9 +73,9 @@ Files derived from the ITS2 (Illumina) sequencing workflow.
 
 ---
 
-### PacBio/
+## PacBio/
 
-Files derived from the full-length ITS (PacBio HiFi) sequencing workflow.
+Data files derived from the full-length ITS (PacBio HiFi) sequencing workflow and used in data analysis (Rcode_main.Rmd).
 
 | File | Description |
 |------|-------------|
@@ -58,6 +96,7 @@ Files derived from the full-length ITS (PacBio HiFi) sequencing workflow.
 | Rcode_ResponseToReviewer1_DepthRarefaction.Rmd | Rarefaction and sequencing-depth analyses performed in response to Reviewer 1 (Figure S10). |
 | Rcode_ResponseToReviewer2_PairedOrdination.Rmd | CLR-transformed Euclidean (Aitchison) ordination analyses performed in response to Reviewer 2 (Figure S8a). |
 | MS_IndoorMycobiome.Rproj | RStudio project file used to organize the analysis workflow. |
+| Command_BLAST_PacBio_db | Command-line workflow used to generate a BLAST database from PacBio full-length ITS ASVs, BLAST ITS2 representative sequences against the PacBio database|
 
 ---
 
