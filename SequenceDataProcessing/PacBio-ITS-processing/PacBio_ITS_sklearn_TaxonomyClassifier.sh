@@ -18,7 +18,7 @@
 #!/bin/bash
 #SBATCH --job-name=TaxonomyClassifier
 #SBATCH --mem=100000
-#SBATCH --partition=dmcshared,scavenger
+#SBATCH --partition=partition.name
 #SBATCH --cpus-per-task=4
 #SBATCH --time=12:00:00
 #SBATCH --out=TaxonomyClassifier.out
