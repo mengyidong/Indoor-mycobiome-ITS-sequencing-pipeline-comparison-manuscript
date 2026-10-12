@@ -6,7 +6,7 @@
 #SBATCH --error=ITS2-taxclassifier.err
 
 # Usage:
-# sbatch /path/to/4_ITS2-taxclassifier_ASV.sh /path/to/inputfile /path/to/qiime2.sif
+# sbatch /path/to/3_ITS2-taxclassifier_ASV.sh /path/to/inputfile /path/to/qiime2.sif
 
 ###Taxonomy classification with pre-trained taxonomic classifier for the UNITE database of full length ITS sequences####
 wget https://github.com/colinbrislawn/unite-train/releases/download/v9.0-v25.07.2023-qiime2-2023.9/unite_ver9_dynamic_all_25.07.2023-Q2-2023.9.qza -O unite_ver9_dynamic_all_25.07.2023-Q2-2023.9.qza
