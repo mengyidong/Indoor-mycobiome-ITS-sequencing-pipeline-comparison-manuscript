@@ -67,7 +67,7 @@ rarecurve(otu_ITS2_pacbio, step = 1000, sample=min(rowSums(otu_ITS2_pacbio)),lab
 summary(sample_sums(ps_PacBio_Fungi_match))
 summary(sample_sums(ps_Illumina_ITS2))
 
-depth_shared <- 1000  # Choose based on previous rarefaction curve
+depth_shared <- 2000  # Choose based on previous rarefaction curve
 
 # Rarefy both to same depth
 set.seed(123)
